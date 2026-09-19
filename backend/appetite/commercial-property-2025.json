@@ -1,0 +1,121 @@
+{
+  "id": "commercial-property-2025",
+  "name": "Commercial Property Appetite",
+  "version": "2025.1",
+  "effective_from": "2025-01-01",
+  "source": "Federato challenge appetite guidelines",
+  "requirements": [
+    {
+      "id": "R1",
+      "name": "New business",
+      "fact": "submission_type",
+      "operator": "in_normalized",
+      "value": ["new", "new business", "newbusiness"],
+      "expected": "New business; renewal is not acceptable",
+      "missing_note": "Submission type is missing."
+    },
+    {
+      "id": "R2",
+      "name": "Property line of business",
+      "fact": "line_of_business",
+      "operator": "contains_normalized",
+      "value": "property",
+      "expected": "Property",
+      "missing_note": "Line of business is missing."
+    },
+    {
+      "id": "R3",
+      "name": "Eligible primary risk state",
+      "fact": "primary_state",
+      "operator": "in",
+      "value": ["OH", "PA", "MD", "CO", "CA", "FL", "NC", "SC", "GA", "VA", "UT"],
+      "expected": "OH, PA, MD, CO, CA, FL, NC, SC, GA, VA, or UT",
+      "missing_note": "Primary risk state is missing."
+    },
+    {
+      "id": "R4",
+      "name": "TIV at or below $150M",
+      "fact": "tiv",
+      "operator": "lte",
+      "value": 150000000,
+      "expected": "At most $150M",
+      "missing_note": "Total insured value is missing."
+    },
+    {
+      "id": "R5",
+      "name": "Premium in acceptable range",
+      "fact": "premium",
+      "operator": "between",
+      "value": [50000, 175000],
+      "expected": "$50K-$175K inclusive",
+      "missing_note": "Premium is missing."
+    },
+    {
+      "id": "R6",
+      "name": "Buildings newer than 1990",
+      "fact": "oldest_building_year",
+      "operator": "gt",
+      "value": 1990,
+      "review_values": [1990],
+      "expected": "Every relevant building newer than 1990",
+      "missing_note": "One or more building years are missing.",
+      "note": "Oldest relevant building controls; exactly 1990 is not classified by the supplied guide."
+    },
+    {
+      "id": "R7",
+      "name": "Acceptable construction majority",
+      "fact": "acceptable_construction_share",
+      "operator": "gt",
+      "value": 0.5,
+      "review_values": [0.5],
+      "expected": ">50% joisted masonry, non-combustible/steel, or masonry non-combustible",
+      "missing_note": "One or more construction types are missing."
+    },
+    {
+      "id": "R8",
+      "name": "Five-year loss value below $100K",
+      "fact": "five_year_loss_total",
+      "operator": "lt",
+      "value": 100000,
+      "review_values": [100000],
+      "expected": "Aggregate applicable losses under $100K",
+      "missing_note": "One or more claims lack a loss date or loss value.",
+      "note": "Exactly $100K is not classified by the supplied guide."
+    }
+  ],
+  "preferences": [
+    {
+      "id": "P1",
+      "name": "Target state",
+      "fact": "primary_state",
+      "operator": "in",
+      "value": ["OH", "PA", "MD", "CO", "CA", "FL"],
+      "expected": "OH, PA, MD, CO, CA, or FL"
+    },
+    {
+      "id": "P2",
+      "name": "Target TIV",
+      "fact": "tiv",
+      "operator": "between",
+      "value": [50000000, 100000000],
+      "expected": "$50M-$100M inclusive"
+    },
+    {
+      "id": "P3",
+      "name": "Target premium",
+      "fact": "premium",
+      "operator": "between",
+      "value": [75000, 100000],
+      "expected": "$75K-$100K inclusive"
+    },
+    {
+      "id": "P4",
+      "name": "Buildings newer than 2010",
+      "fact": "oldest_building_year",
+      "operator": "gt",
+      "value": 2010,
+      "expected": "Every relevant building newer than 2010",
+      "note": "Oldest relevant building controls."
+    }
+  ]
+}

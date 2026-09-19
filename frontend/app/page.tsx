@@ -1,5 +1,5 @@
-import { UnderwritingWorkbench } from "./components/UnderwritingWorkbench";
+import Dashboard from "./dashboard";
 
 export default function Home() {
-  return <UnderwritingWorkbench />;
+  return <Dashboard />;
 }
