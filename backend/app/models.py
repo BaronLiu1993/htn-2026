@@ -11,7 +11,7 @@ AssessmentStatus = Literal[
 ]
 RuleState = Literal["passed", "failed", "matched", "not_matched", "unresolved"]
 TraceStatus = Literal["success", "retry", "failure", "cached"]
-AgentMode = Literal["openai", "deterministic_fallback"]
+AgentMode = Literal["openai", "openai_required"]
 
 
 class BuildingEvidence(BaseModel):
@@ -147,7 +147,7 @@ class AnalysisRun(BaseModel):
     appetite_id: str
     appetite_version: str
     appetite_effective_date: date
-    agent_mode: AgentMode = "deterministic_fallback"
+    agent_mode: AgentMode = "openai_required"
     agent_model: str | None = None
     agent_summary: str | None = None
     agent_adaptations: list[str] = Field(default_factory=list)

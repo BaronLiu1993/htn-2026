@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import time
 from datetime import datetime
 from uuid import uuid4
@@ -200,6 +201,25 @@ class UnderwriteService:
             )
             self.runs[run_id] = run
             return run
+
+        if self.agent is None:
+            run = AnalysisRun(
+                run_id=run_id,
+                mode=self.mode,
+                status="failed",
+                created_at=datetime.now(),
+                schema_source="live" if self.mode == "live" else "demo",
+                assessments=[],
+                trace=trace,
+                errors=["OpenAI is required for analysis. Configure OPENAI_API_KEY and restart the backend."],
+                appetite_id=self.appetite.id,
+                appetite_version=self.appetite.version,
+                appetite_effective_date=self.appetite.effective_from,
+                agent_mode="openai_required",
+                agent_summary="Analysis did not run because OpenAI is not configured.",
+            )
+            self.runs[run_id] = run
+            return run
         try:
             evidence, schema_source = await self._evidence(
                 trace, force_refresh=request.force_schema_refresh
@@ -258,61 +278,81 @@ class UnderwriteService:
                 )
             )
 
-        agent_mode = "deterministic_fallback"
+        agent_mode = "openai_required"
         agent_model: str | None = None
-        agent_summary = "Deterministic analysis completed; OpenAI agent is not configured."
+        agent_summary: str | None = None
         agent_adaptations: list[str] = []
-        if self.agent is not None:
-            agent_registry = self.registry or SchemaRegistry(DEMO_SCHEMA)
-            try:
-                agent_result = await self.agent.run(
+        agent_registry = self.registry or SchemaRegistry(DEMO_SCHEMA)
+        try:
+            agent_result = await asyncio.wait_for(
+                self.agent.run(
                     assessments=assessments,
                     registry=agent_registry,
                     appetite=self.appetite,
                     federato=self.client,
                     mode=self.mode,
                     trace=trace,
-                )
-                applied, report_warnings = apply_agent_report(
-                    assessments, agent_result.report
-                )
-                for warning in report_warnings:
-                    trace.append(
-                        TraceEvent(
-                            id=f"trace_{uuid4().hex[:10]}",
-                            tool="validate_agent_report",
-                            purpose="Ground AI explanations in verified evidence",
-                            status="failure",
-                            started_at=datetime.now(),
-                            duration_ms=1,
-                            result_summary="Rejected an unsupported AI explanation detail",
-                            error=warning,
-                        )
-                    )
-                agent_mode = "openai"
-                agent_model = agent_result.model
-                agent_summary = (
-                    f"{agent_result.report.plan_summary} Applied {applied} grounded "
-                    f"explanation(s) after {agent_result.tool_calls} tool call(s)."
-                )
-                agent_adaptations = agent_result.report.adaptations
-            except Exception as exc:
-                agent_summary = (
-                    "OpenAI agent failed safely; deterministic classifications and explanations "
-                    "were preserved."
-                )
+                ),
+                timeout=self.settings.openai_request_timeout_seconds,
+            )
+            applied, report_warnings = apply_agent_report(
+                assessments, agent_result.report
+            )
+            for warning in report_warnings:
                 trace.append(
                     TraceEvent(
                         id=f"trace_{uuid4().hex[:10]}",
-                        tool="openai_agent",
-                        purpose="Plan and verify underwriting evidence",
+                        tool="validate_agent_report",
+                        purpose="Ground AI explanations in verified evidence",
                         status="failure",
                         started_at=datetime.now(),
                         duration_ms=1,
-                        result_summary="Fell back to deterministic analysis",
-                        error=str(exc),
+                        result_summary="Rejected an unsupported AI explanation detail",
+                        error=warning,
                     )
                 )
+            agent_mode = "openai"
+            agent_model = agent_result.model
+            agent_summary = (
+                f"{agent_result.report.plan_summary} Applied {applied} grounded "
+                f"explanation(s) after {agent_result.tool_calls} tool call(s)."
+            )
+            agent_adaptations = agent_result.report.adaptations
+        except Exception as exc:
+            message = (
+                f"OpenAI analysis exceeded {self.settings.openai_request_timeout_seconds:g} seconds."
+                if isinstance(exc, TimeoutError)
+                else f"OpenAI analysis failed: {exc}"
+            )
+            trace.append(
+                TraceEvent(
+                    id=f"trace_{uuid4().hex[:10]}",
+                    tool="openai_agent",
+                    purpose="Plan and verify underwriting evidence",
+                    status="failure",
+                    started_at=datetime.now(),
+                    duration_ms=1,
+                    result_summary="OpenAI analysis failed; no fallback result was returned",
+                    error=message,
+                )
+            )
+            run = AnalysisRun(
+                run_id=run_id,
+                mode=self.mode,
+                status="failed",
+                created_at=datetime.now(),
+                schema_source=schema_source,
+                assessments=[],
+                trace=trace,
+                errors=[*errors, message],
+                appetite_id=self.appetite.id,
+                appetite_version=self.appetite.version,
+                appetite_effective_date=self.appetite.effective_from,
+                agent_mode="openai_required",
+                agent_summary="OpenAI analysis failed. No fallback queue was returned.",
+            )
+            self.runs[run_id] = run
+            return run
 
         run = AnalysisRun(
             run_id=run_id,

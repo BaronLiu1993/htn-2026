@@ -426,7 +426,7 @@ export default function Dashboard() {
             <span>Appetite v{appetite.version} · {appetite.requirement_count} requirements</span>
           ) : null}
           <span>
-            {agentConfigured ? "OpenAI agent configured" : "Deterministic fallback active"}
+            {agentConfigured ? "OpenAI agent configured" : "OpenAI agent required"}
           </span>
         </div>
 
@@ -449,13 +449,13 @@ export default function Dashboard() {
             <h1>Submission intelligence</h1>
           </div>
           <div className="topbar-actions">
-            <Badge variant="outline" className={`agent-pill agent-${run?.agent_mode ?? (agentConfigured ? "ready" : "fallback")}`}>
+            <Badge variant="outline" className={`agent-pill agent-${run?.agent_mode ?? (agentConfigured ? "ready" : "required")}`}>
               <SparkIcon size={13} />
               {run?.agent_mode === "openai"
                 ? `OpenAI · ${run.agent_model || "agent"}`
                 : agentConfigured
                   ? "OpenAI ready"
-                  : "Agent fallback"}
+                  : "OpenAI required"}
             </Badge>
             <Badge variant="outline" className={`mode-pill mode-${mode}`}>
               <span />
@@ -726,7 +726,7 @@ export default function Dashboard() {
                     <small className="explanation-source">
                       {selected.explanation_source === "openai"
                         ? "Explanation written by OpenAI from verified evidence"
-                        : "Deterministic fallback explanation"}
+                        : "Rule-engine explanation"}
                     </small>
                   </section>
                   <section className="fact-grid">

@@ -16,7 +16,7 @@ UnderwriteIQ does not approve, price, quote, or bind insurance coverage.
 - `target`, `acceptable`, `needs_review`, and `out_of_appetite` classifications.
 - COPE evidence coverage that separates informational factors from carrier decision rules.
 - OpenAI Responses API agent with strict schema, appetite, and Federato query tools.
-- Dynamic schema-grounded query construction with bounded repair and deterministic fallback.
+- Dynamic schema-grounded query construction with bounded repair and visible OpenAI failures.
 - Evidence-grounded AI explanations that cannot override appetite outcomes.
 - Stable queue ranking, evidence-backed explanations, and auditable tool traces.
 - Responsive Next.js queue, filters, search, result details, evidence, and activity views.

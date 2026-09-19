@@ -241,16 +241,17 @@ async def test_service_integrates_agent_without_changing_deterministic_ranking()
 
 
 @pytest.mark.anyio
-async def test_service_falls_back_safely_when_openai_fails():
+async def test_service_fails_without_fallback_when_openai_fails():
     configured = replace(settings, openai_api_key="test-key")
     service = UnderwriteService(configured)
     service.agent = BrokenAgent()
 
     run = await service.analyze(BatchAnalysisRequest())
 
-    assert run.status == "completed"
-    assert run.agent_mode == "deterministic_fallback"
-    assert all(item.explanation_source == "deterministic" for item in run.assessments)
+    assert run.status == "failed"
+    assert run.agent_mode == "openai_required"
+    assert run.assessments == []
+    assert any("OpenAI analysis failed" in error for error in run.errors)
     assert any(
         event.tool == "openai_agent" and event.status == "failure"
         for event in run.trace

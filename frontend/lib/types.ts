@@ -98,7 +98,7 @@ export interface AnalysisRun {
   appetite_id: string;
   appetite_version: string;
   appetite_effective_date: string;
-  agent_mode: "openai" | "deterministic_fallback";
+  agent_mode: "openai" | "openai_required";
   agent_model?: string | null;
   agent_summary?: string | null;
   agent_adaptations: string[];
