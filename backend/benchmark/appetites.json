@@ -1,0 +1,81 @@
+{
+  "schema_version": "1.0",
+  "appetites": [
+    {
+      "appetite_id": "conservative-regional-property-v1",
+      "name": "Conservative regional property",
+      "strategy": "Tightly selected, low-catastrophe regional property business.",
+      "rules": {
+        "eligible_states": ["CA", "CO", "FL", "GA", "NC", "SC"],
+        "premium": { "min": 75000, "max": 150000 },
+        "total_tiv_max": 50000000,
+        "building_year_exclusive_min": 2000,
+        "loss_value_5yr_max": 50000,
+        "prohibited_hazards": ["wildfire", "flood", "hurricane"]
+      },
+      "on_missing_required_data": "insufficient_information"
+    },
+    {
+      "appetite_id": "growth-national-property-v1",
+      "name": "Growth national property",
+      "strategy": "Broad property growth with referrals for catastrophe exposure and location ambiguity.",
+      "rules": {
+        "eligible_states": "US",
+        "premium": { "min": 50000, "max": 250000 },
+        "total_tiv_max": 150000000,
+        "building_year_exclusive_min": 1990,
+        "loss_value_5yr_max": 100000,
+        "refer_hazards": ["wildfire", "flood", "hurricane", "earthquake"],
+        "require_primary_risk_location_for_multistate": true
+      },
+      "on_missing_required_data": "insufficient_information"
+    },
+    {
+      "appetite_id": "renewal-property-v1",
+      "name": "Renewal-focused property",
+      "strategy": "Prioritizes renewing accounts; older property may be reviewed when mitigation is evidenced.",
+      "rules": {
+        "business_types": ["renewal"],
+        "eligible_states": "US",
+        "premium": { "min": 50000, "max": 200000 },
+        "total_tiv_max": 100000000,
+        "building_year_exclusive_min": 1970,
+        "loss_value_5yr_max": 150000,
+        "refer_hazards": ["wildfire", "flood", "hurricane"],
+        "refer_if_building_year_at_or_below": 1990
+      },
+      "on_missing_required_data": "insufficient_information"
+    },
+    {
+      "appetite_id": "small-commercial-property-v1",
+      "name": "Small commercial property",
+      "strategy": "Fast-track small, simple, low-loss accounts.",
+      "rules": {
+        "eligible_states": ["CA", "CO", "FL", "GA", "MD", "NC", "OH", "PA", "SC", "UT", "VA"],
+        "premium": { "min": 25000, "max": 100000 },
+        "total_tiv_max": 25000000,
+        "location_count_max": 2,
+        "building_year_exclusive_min": 1990,
+        "loss_value_5yr_max": 25000,
+        "open_or_litigated_claims_allowed": false
+      },
+      "on_missing_required_data": "insufficient_information"
+    },
+    {
+      "appetite_id": "cat-specialty-property-v1",
+      "name": "Catastrophe specialty property",
+      "strategy": "Accepts catastrophe-exposed and older property, using conditions and referrals instead of broad exclusions.",
+      "rules": {
+        "eligible_states": "US",
+        "premium": { "min": 50000, "max": 750000 },
+        "total_tiv_max": 150000000,
+        "building_year_exclusive_min": 1950,
+        "loss_value_5yr_max": 2000000,
+        "refer_hazards": ["wildfire", "flood", "hurricane", "earthquake", "tornado"],
+        "refer_if_multistate": true,
+        "conditions": ["catastrophe deductible", "current inspection", "risk-mitigation evidence"]
+      },
+      "on_missing_required_data": "insufficient_information"
+    }
+  ]
+}

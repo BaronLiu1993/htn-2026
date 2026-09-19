@@ -1,0 +1,32 @@
+{
+  "schema_version": "1.0",
+  "live_query": {
+    "action": "query",
+    "payload": {
+      "resource": "Policy",
+      "expand": {
+        "insured": true,
+        "exposure_units": { "location": { "buildings": true } },
+        "claims": true
+      }
+    }
+  },
+  "policies": [
+    { "policy_id": "live-pr-2024-1076", "kind": "live", "source": { "resource": "Policy", "id": 1076, "policy_number": "PR-2024-1076" }, "facts": { "premium": 45900, "business_type": "new", "states": ["TN"], "total_tiv": 10628000, "min_building_year": 2013, "loss_value_5yr": 147400, "location_count": 1, "hazards": ["tornado", "flood"] } },
+    { "policy_id": "live-pr-2026-1081", "kind": "live", "source": { "resource": "Policy", "id": 1081, "policy_number": "PR-2026-1081" }, "facts": { "premium": 58800, "business_type": "new", "states": ["CA"], "total_tiv": 18492000, "min_building_year": 1993, "loss_value_5yr": 629200, "location_count": 1, "hazards": ["wildfire", "flood"] } },
+    { "policy_id": "live-pr-2026-1038", "kind": "live", "source": { "resource": "Policy", "id": 1038, "policy_number": "PR-2026-1038" }, "facts": { "premium": 82300, "business_type": "renewal", "states": ["CA"], "total_tiv": 13436000, "min_building_year": 1985, "loss_value_5yr": 0, "location_count": 1, "hazards": ["wildfire", "flood"] } },
+    { "policy_id": "live-pr-2026-1007", "kind": "live", "source": { "resource": "Policy", "id": 1007, "policy_number": "PR-2026-1007" }, "facts": { "premium": 79200, "business_type": "renewal", "states": ["IL", "FL"], "total_tiv": 34793000, "min_building_year": 1995, "loss_value_5yr": 0, "location_count": 2, "hazards": ["hail", "flood", "hurricane"] } },
+    { "policy_id": "live-pr-2026-1028", "kind": "live", "source": { "resource": "Policy", "id": 1028, "policy_number": "PR-2026-1028" }, "facts": { "premium": 177500, "business_type": "new", "states": ["CA", "AZ"], "total_tiv": 64817000, "min_building_year": 1969, "loss_value_5yr": 0, "location_count": 2, "hazards": ["wildfire", "hail"] } },
+    { "policy_id": "live-pr-2025-1001", "kind": "live", "source": { "resource": "Policy", "id": 1001, "policy_number": "PR-2025-1001" }, "facts": { "premium": 619900, "business_type": "new", "states": ["FL", "AZ", "WA", "CA"], "total_tiv": 112568000, "min_building_year": 1954, "loss_value_5yr": 1624400, "location_count": 4, "hazards": ["wind", "hurricane", "flood", "wildfire", "hail", "earthquake"] } },
+    { "policy_id": "synthetic-001", "kind": "synthetic", "scenario": "clean_accept", "facts": { "premium": 90000, "business_type": "new", "states": ["CA"], "total_tiv": 40000000, "min_building_year": 2015, "loss_value_5yr": 20000, "location_count": 1, "hazards": [] } },
+    { "policy_id": "synthetic-002", "kind": "synthetic", "scenario": "premium_lower_boundary", "facts": { "premium": 50000, "business_type": "new", "states": ["OH"], "total_tiv": 20000000, "min_building_year": 2012, "loss_value_5yr": 0, "location_count": 1, "hazards": [] } },
+    { "policy_id": "synthetic-003", "kind": "synthetic", "scenario": "premium_below_boundary", "counterfactual_of": "synthetic-002", "facts": { "premium": 49999, "business_type": "new", "states": ["OH"], "total_tiv": 20000000, "min_building_year": 2012, "loss_value_5yr": 0, "location_count": 1, "hazards": [] } },
+    { "policy_id": "synthetic-004", "kind": "synthetic", "scenario": "premium_upper_boundary", "facts": { "premium": 175000, "business_type": "new", "states": ["MD"], "total_tiv": 100000000, "min_building_year": 2011, "loss_value_5yr": 25000, "location_count": 1, "hazards": ["hail"] } },
+    { "policy_id": "synthetic-005", "kind": "synthetic", "scenario": "premium_above_boundary", "counterfactual_of": "synthetic-004", "facts": { "premium": 175001, "business_type": "new", "states": ["MD"], "total_tiv": 100000000, "min_building_year": 2011, "loss_value_5yr": 25000, "location_count": 1, "hazards": ["hail"] } },
+    { "policy_id": "synthetic-006", "kind": "synthetic", "scenario": "building_year_boundary", "facts": { "premium": 95000, "business_type": "new", "states": ["VA"], "total_tiv": 30000000, "min_building_year": 1990, "loss_value_5yr": 10000, "location_count": 1, "hazards": [] } },
+    { "policy_id": "synthetic-007", "kind": "synthetic", "scenario": "tiv_upper_boundary", "facts": { "premium": 100000, "business_type": "new", "states": ["GA"], "total_tiv": 150000000, "min_building_year": 2018, "loss_value_5yr": 50000, "location_count": 1, "hazards": ["wind"] } },
+    { "policy_id": "synthetic-008", "kind": "synthetic", "scenario": "tiv_above_boundary", "counterfactual_of": "synthetic-007", "facts": { "premium": 100000, "business_type": "new", "states": ["GA"], "total_tiv": 150000001, "min_building_year": 2018, "loss_value_5yr": 50000, "location_count": 1, "hazards": ["wind"] } },
+    { "policy_id": "synthetic-009", "kind": "synthetic", "scenario": "missing_loss_history", "facts": { "premium": 85000, "business_type": "new", "states": ["UT"], "total_tiv": 20000000, "min_building_year": 2016, "loss_value_5yr": null, "location_count": 1, "hazards": [] } },
+    { "policy_id": "synthetic-010", "kind": "synthetic", "scenario": "multi_location_conflict", "facts": { "premium": 95000, "business_type": "renewal", "states": ["CA", "NY"], "total_tiv": 90000000, "min_building_year": 2012, "loss_value_5yr": 25000, "location_count": 2, "hazards": ["wildfire", "winter_storm"] } }
+  ]
+}
