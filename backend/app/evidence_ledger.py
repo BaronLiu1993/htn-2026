@@ -24,6 +24,7 @@ from .schema_registry import SchemaRegistry
 APPROVED_OPERATIONS: set[FactOperation] = {
     "scalar",
     "minimum",
+    "maximum",
     "sum",
     "weighted_match_share",
     "rolling_sum",
@@ -151,6 +152,11 @@ def validate_binding(
                 "reason": f'Unknown fact "{binding.fact_id}".',
             }
         )
+    if definition.source.record_filter and binding.operation != definition.source.operation:
+        return binding.model_copy(update={
+            "status": "unbound",
+            "reason": "The record subset and aggregation are fixed by this guideline fact.",
+        })
     if binding.operation not in APPROVED_OPERATIONS:
         return binding.model_copy(
             update={
@@ -173,6 +179,7 @@ def validate_binding(
             *binding.fields,
             binding.date_field,
             binding.weight_field,
+            *definition.source.record_filter,
         )
         if path
     ]
@@ -205,7 +212,7 @@ def validate_binding(
                 "reason": f'Scalar binding for {binding.fact_id} is missing a field path.',
             }
         )
-    if binding.operation in {"minimum", "sum", "weighted_match_share"} and not (
+    if binding.operation in {"minimum", "maximum", "sum", "weighted_match_share"} and not (
         collection and binding.field
     ):
         return binding.model_copy(
@@ -232,6 +239,7 @@ def validate_binding(
             "match_values": definition.source.match_values,
             "window_years": definition.source.window_years or binding.window_years,
             "require_all": definition.source.require_all,
+            "record_filter": definition.source.record_filter,
         }
     )
 
@@ -266,6 +274,7 @@ def discover_bindings(
                         match_values=source.match_values,
                         window_years=source.window_years,
                         require_all=source.require_all,
+                        record_filter=source.record_filter,
                     )
                 )
                 continue
@@ -343,7 +352,7 @@ def _discover_equivalent(definition: RequiredFact, registry: SchemaRegistry) -> 
         field = _match_field(registry, resource, *aliases)
         if not field:
             continue
-        if source.operation in {"minimum", "weighted_match_share", "sum"}:
+        if source.operation in {"minimum", "maximum", "weighted_match_share", "sum"}:
             weight = _match_field(registry, resource, source.weight_field or "", "tiv") if source.weight_field else None
             return FactBinding(
                 fact_id=definition.id,
@@ -534,6 +543,13 @@ class FactMapper:
         return definition.source
 
     def bound_fields(self, resource: str) -> set[str]:
+        return {
+            normalized(part).replace(" ", "")
+            for path in self.bound_paths(resource)
+            for part in (path.split(".")[0], path.split(".")[-1])
+        }
+
+    def bound_paths(self, resource: str) -> set[str]:
         fields: set[str] = set()
         for definition in self.package.required_facts:
             source = self._source_for(definition)
@@ -545,9 +561,10 @@ class FactMapper:
                 source.date_field,
                 source.weight_field,
                 *source.fields,
+                *source.record_filter,
             ):
                 if value:
-                    fields.add(normalized(value.split(".")[-1]).replace(" ", ""))
+                    fields.add(value)
         return fields
 
     def _collection_complete(self, submission: SubmissionEvidence, resource: str) -> bool:
@@ -595,7 +612,7 @@ class FactMapper:
             submission
         ):
             return (
-                "No linked property Policy was found, so this fact cannot be confirmed "
+                "No linked Policy has been retrieved, so this fact cannot be confirmed "
                 "from source evidence."
             )
         return f"No {source.resource} records were available."
@@ -780,6 +797,15 @@ class FactMapper:
             )
 
         records = self._raw_rows(submission, source.resource) or payload.get(source.collection or "") or []
+        filter_complete = all(
+            _declared_value(record, field)[1] is not None
+            for record in records for field in source.record_filter
+        )
+        if source.record_filter:
+            records = [record for record in records if all(
+                _declared_value(record, field)[1] == value
+                for field, value in source.record_filter.items()
+            )]
         if not records and source.operation in {"rolling_sum", "rolling_component_sum"} and self._collection_complete(submission, source.resource):
             cutoff = _cutoff(self.as_of, source.window_years or 0)
             if not submission.raw_records:
@@ -814,8 +840,8 @@ class FactMapper:
                 observations=[],
                 note=self._missing_source_note(submission, source),
             )
-        collection_complete = self._collection_complete(submission, source.resource)
-        if source.operation == "minimum":
+        collection_complete = filter_complete and self._collection_complete(submission, source.resource)
+        if source.operation in {"minimum", "maximum"}:
             observations = [
                 self._observation(
                     definition,
@@ -830,7 +856,7 @@ class FactMapper:
             complete = collection_complete and (len(known) == len(records) or not source.require_all)
             return self._fact(
                 definition,
-                value=min(known) if known else None,
+                value=(min(known) if source.operation == "minimum" else max(known)) if known else None,
                 state="verified" if known and complete else "missing",
                 observations=observations,
                 note=None if complete else f"One or more {definition.label.lower()} observations are missing.",

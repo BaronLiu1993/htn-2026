@@ -8,6 +8,8 @@ from uuid import uuid4
 
 from .adapters import DemoFederatoAdapter, FederatoAdapter
 from .agent import UnderwritingAgent
+from .explanations import explain_assessments
+from .enrichment import enrich_disasters
 from .baseten_agent import BasetenRunResult, BasetenUnderwriter
 from .evidence_search import EvidenceSearch
 from .config import Settings
@@ -90,7 +92,7 @@ def _business_activity(trace: list[TraceEvent]) -> list[TraceEvent]:
         event
         for event in trace
         if event.tool
-        in {"load_guideline", "prepare_queue", "bind_facts", "federato_query", "plan_fact_sources"}
+        in {"load_guideline", "prepare_queue", "bind_facts", "federato_query", "plan_fact_sources", "explain_assessments", "external_enrichment"}
         or event.status == "failure"
     ]
     grouped: list[TraceEvent] = []
@@ -555,9 +557,14 @@ class UnderwriteService:
         mapper.finalize_unbound(search.ledgers)
         try:
             if provider == "openai" and gateway.budget_remaining > 0:
+                await search.fill_policies(gateway)
                 await search.fill_headquarters(gateway)
         except Exception as exc:
-            errors.append(f"Headquarters evidence search failed: {exc}")
+            return self._failed_run(
+                run_id, package, trace, [*errors, f"Required evidence search failed: {exc}"],
+                schema_source=schema_source, started=started, gateway=gateway,
+                selection=selection, ledgers=search.ledgers, provider=provider,
+            )
         mapper.finalize_unbound(search.ledgers)
         applicable = list(zip(search.submissions, search.ledgers))
         resolved_by_agent = search.useful_changes
@@ -652,6 +659,21 @@ class UnderwriteService:
                 )
             )
 
+        if self.mode == "live":
+            before_enrichment = {item.submission_id: index for index, item in enumerate(rank_assessments(assessments, package))}
+            await enrich_disasters(assessments, trace)
+            moved = 0
+            for index, item in enumerate(rank_assessments(assessments, package)):
+                item.enrichment_rank_change = before_enrichment[item.submission_id] - index
+                moved += item.enrichment_rank_change != 0
+            if trace[-1].tool == "external_enrichment" and trace[-1].status == "success":
+                trace[-1].result_summary += f" {moved} submissions changed position within their appetite status."
+        if provider == "openai" and self.agent is not None:
+            await explain_assessments(self.agent, assessments, trace)
+
+        if agent_result is not None and agent_result.stop_reason == "no_useful_search" and search.policy_search_completed:
+            if search.coverage()["submissions_without_policy_count"]:
+                agent_result.stop_reason = "source_data_missing"
         unresolved = sum(
             fact.state != "verified"
             for _, ledger in applicable
@@ -709,11 +731,7 @@ class UnderwriteService:
             agent_stop_reason=(
                 agent_result.stop_reason if agent_result is not None else None
             ),
-            unresolved_facts_by_reason=(
-                agent_result.unresolved_facts_by_reason
-                if agent_result is not None
-                else {}
-            ),
+            unresolved_facts_by_reason=search.coverage()["unresolved_by_reason"],
             model_latency_ms=(
                 agent_result.model_latency_ms
                 if agent_result is not None

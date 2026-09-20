@@ -48,6 +48,7 @@
     "tie_breakers": [
       {"field": "target_matches", "direction": "desc"},
       {"field": "evidence_completeness", "direction": "desc"},
+      {"field": "disaster_declaration_count", "direction": "asc"},
       {"field": "received_date", "direction": "asc"},
       {"field": "submission_id", "direction": "asc"}
     ]

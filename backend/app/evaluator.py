@@ -152,36 +152,28 @@ def evaluate_ledger(
 
     if failed:
         status = "out_of_appetite"
-        noun = "requirement" if len(failed) == 1 else "requirements"
-        explanation = (
-            f"Outside appetite: {len(failed)} {noun} not met "
-            f"({_join(item.name for item in failed)}). "
-            "Target preferences cannot offset a failed requirement."
-        )
         action = "Deprioritize and confirm the failed requirement before further review"
     elif unresolved:
         status = "needs_review"
-        noun = "check" if len(unresolved) == 1 else "checks"
-        explanation = (
-            f"Eligibility unconfirmed: {len(unresolved)} {noun} could not be resolved from "
-            f"source evidence ({_join(item.name for item in unresolved)}). "
-            "No hard failure was verified."
-        )
         action = "Request the missing or conflicting information"
     elif target_total > 0 and target_matches == target_total:
         status = "target"
-        explanation = (
-            f"Meets every requirement and all {target_total} target preferences in "
-            f"{package.name}."
-        )
         action = "Prioritize for underwriting review"
     else:
         status = "acceptable"
-        explanation = (
-            f"Meets every requirement and {target_matches} of {target_total} target "
-            "preferences."
-        )
         action = "Keep in the review queue after target submissions"
+
+    if failed:
+        factor = failed[0]
+        explanation = f"This account is outside appetite. {factor.name}: source value {factor.actual_value}; requirement {factor.expected}. {action}."
+    elif unresolved:
+        missing_policy = any("linked Policy" in (fact.note or "") for fact in ledger.facts)
+        if missing_policy:
+            action = "Request the Policy record"
+        detail = "The search did not find a linked Policy" if missing_policy else f"{unresolved[0].name} is unconfirmed"
+        explanation = f"Eligibility is not confirmed. {detail}. {action}."
+    else:
+        explanation = f"This account meets every requirement. It matches {target_matches} of {target_total} target preferences. {action}."
 
     missing_information = [
         item.note or f"Resolve {item.name.lower()}"
@@ -204,7 +196,9 @@ def evaluate_ledger(
         submission_id=submission.id,
         submission_number=submission.submission_number,
         insured_name=submission.insured_name,
+        insured_id=submission.insured_id,
         received_date=submission.received_date,
+        effective_date=submission.effective_date,
         status=status,
         target_matches=target_matches,
         target_preferences_total=target_total,

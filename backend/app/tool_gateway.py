@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .federato_client import repairable_query_error
+
 import asyncio
 import json
 import re
@@ -84,6 +86,11 @@ class ToolGateway:
                 self.trace[-1].source_resource = str(payload.get("resource") or "")
                 self.trace[-1].fact_ids = fact_ids or self.trace[-1].fact_ids
         except Exception as exc:
+            if (repairable_query_error(exc) and self.trace
+                    and self.trace[-1].tool == "federato_query"
+                    and self.trace[-1].status == "failure"):
+                self.trace[-1].status = "retry"
+                self.trace[-1].result_summary = "The query needs a different field path. The search will be revised."
             self.query_audits.append(
                 QueryAudit(
                     id=audit_id,

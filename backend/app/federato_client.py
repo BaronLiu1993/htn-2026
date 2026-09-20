@@ -13,6 +13,14 @@ class FederatoError(RuntimeError):
     """Safe, user-facing Federato integration failure."""
 
 
+def repairable_query_error(exc: Exception) -> bool:
+    from .schema_registry import QueryValidationError
+    return isinstance(exc, QueryValidationError) or (
+        isinstance(exc, FederatoError)
+        and any(token in str(exc) for token in ("VALIDATION_ERROR", "Unknown field", 'Invalid "$expand"', "Unknown resource"))
+    )
+
+
 class FederatoClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings

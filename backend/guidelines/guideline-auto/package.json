@@ -1,0 +1,284 @@
+{
+  "id": "guideline-auto",
+  "name": "Commercial auto \u2014 sample",
+  "version": "2026.2",
+  "effective_from": "2026-01-01",
+  "effective_to": null,
+  "source": "UnderwriteIQ sample commercial-auto appetite with illustrative fleet and driver thresholds. Not official Federato carrier rules.",
+  "scope": {
+    "fact": "line_of_business",
+    "operator": "contains_normalized",
+    "value": "auto",
+    "description": "Commercial auto submissions",
+    "source": {
+      "resource": "Submission",
+      "field": "line_of_business",
+      "required": true
+    }
+  },
+  "required_facts": [
+    {
+      "id": "submission_type",
+      "label": "Submission type",
+      "source": {
+        "resource": "Submission",
+        "path": "submission_type"
+      }
+    },
+    {
+      "id": "line_of_business",
+      "label": "Line of business",
+      "source": {
+        "resource": "Submission",
+        "path": "line_of_business"
+      }
+    },
+    {
+      "id": "primary_state",
+      "label": "Primary risk state",
+      "source": {
+        "resource": "Location",
+        "path": "primary_state",
+        "field": "state"
+      }
+    },
+    {
+      "id": "premium",
+      "label": "Total premium",
+      "source": {
+        "resource": "Policy",
+        "path": "premium"
+      }
+    },
+    {
+      "id": "five_year_loss_total",
+      "label": "Five-year loss total",
+      "source": {
+        "resource": "Claim",
+        "collection": "claims",
+        "date_field": "loss_date",
+        "field": "loss_value",
+        "operation": "rolling_sum",
+        "window_years": 5,
+        "require_all": true
+      }
+    },
+    {
+      "id": "max_driver_accidents",
+      "label": "Most accidents for one driver in three years",
+      "source": {
+        "resource": "ExposureUnit",
+        "collection": "exposure_units",
+        "field": "driver.accidents_3yr",
+        "operation": "maximum",
+        "record_filter": {
+          "kind": "driver"
+        },
+        "require_all": true
+      }
+    },
+    {
+      "id": "max_driver_points",
+      "label": "Highest driver record points",
+      "source": {
+        "resource": "ExposureUnit",
+        "collection": "exposure_units",
+        "field": "driver.mvr_points",
+        "operation": "maximum",
+        "record_filter": {
+          "kind": "driver"
+        },
+        "require_all": true
+      }
+    },
+    {
+      "id": "max_vehicle_radius",
+      "label": "Largest vehicle operating radius (miles)",
+      "source": {
+        "resource": "ExposureUnit",
+        "collection": "exposure_units",
+        "field": "vehicle.radius_miles",
+        "operation": "maximum",
+        "record_filter": {
+          "kind": "vehicle"
+        },
+        "require_all": true
+      }
+    },
+    {
+      "id": "oldest_vehicle_year",
+      "label": "Oldest vehicle model year",
+      "source": {
+        "resource": "ExposureUnit",
+        "collection": "exposure_units",
+        "field": "vehicle.year",
+        "operation": "minimum",
+        "record_filter": {
+          "kind": "vehicle"
+        },
+        "require_all": true
+      }
+    }
+  ],
+  "sufficiency": {
+    "required_rule_kinds": [
+      "requirement"
+    ],
+    "unresolved_behavior": "needs_review"
+  },
+  "requirements": [
+    {
+      "id": "A1",
+      "name": "Auto line of business",
+      "fact": "line_of_business",
+      "operator": "contains_normalized",
+      "value": "auto",
+      "expected": "Auto"
+    },
+    {
+      "id": "A2",
+      "name": "New business",
+      "fact": "submission_type",
+      "operator": "in_normalized",
+      "value": [
+        "new",
+        "new business",
+        "newbusiness"
+      ],
+      "expected": "New business"
+    },
+    {
+      "id": "A5",
+      "name": "Driver accidents in three years",
+      "fact": "max_driver_accidents",
+      "operator": "lte",
+      "value": 2,
+      "expected": "At most 2 accidents per driver in three years (sample)",
+      "missing_note": "Retrieve every linked exposure record and confirm this field for each relevant driver or vehicle."
+    },
+    {
+      "id": "A6",
+      "name": "Driver record points",
+      "fact": "max_driver_points",
+      "operator": "lte",
+      "value": 6,
+      "expected": "At most 6 driving-record points per driver (sample)",
+      "missing_note": "Retrieve every linked exposure record and confirm this field for each relevant driver or vehicle."
+    },
+    {
+      "id": "A7",
+      "name": "Vehicle operating radius",
+      "fact": "max_vehicle_radius",
+      "operator": "lte",
+      "value": 500,
+      "expected": "Every vehicle operates within 500 miles (sample)",
+      "missing_note": "Retrieve every linked exposure record and confirm this field for each relevant driver or vehicle."
+    },
+    {
+      "id": "A8",
+      "name": "Vehicle model year",
+      "fact": "oldest_vehicle_year",
+      "operator": "gte",
+      "value": 2012,
+      "expected": "Every vehicle is model year 2012 or newer (sample)",
+      "missing_note": "Retrieve every linked exposure record and confirm this field for each relevant driver or vehicle."
+    },
+    {
+      "id": "A3",
+      "name": "Sample premium range",
+      "fact": "premium",
+      "operator": "between",
+      "value": [
+        25000,
+        250000
+      ],
+      "expected": "$25,000\u2013$250,000 inclusive (sample)"
+    },
+    {
+      "id": "A4",
+      "name": "Sample five-year loss limit",
+      "fact": "five_year_loss_total",
+      "operator": "lt",
+      "value": 150000,
+      "expected": "Below $150,000 (sample)"
+    }
+  ],
+  "preferences": [
+    {
+      "id": "AP1",
+      "name": "Lower five-year losses",
+      "fact": "five_year_loss_total",
+      "operator": "lt",
+      "value": 50000,
+      "expected": "Below $50,000 (sample)"
+    },
+    {
+      "id": "AP2",
+      "name": "No driver accidents in three years",
+      "fact": "max_driver_accidents",
+      "operator": "equals",
+      "value": 0,
+      "expected": "Every driver has zero accidents in three years (sample)"
+    },
+    {
+      "id": "AP3",
+      "name": "Local operating radius",
+      "fact": "max_vehicle_radius",
+      "operator": "lte",
+      "value": 200,
+      "expected": "Every vehicle operates within 200 miles (sample)"
+    }
+  ],
+  "ranking": {
+    "status_order": [
+      "target",
+      "acceptable",
+      "needs_review",
+      "out_of_appetite"
+    ],
+    "tie_breakers": [
+      {
+        "field": "target_matches",
+        "direction": "desc"
+      },
+      {
+        "field": "evidence_completeness",
+        "direction": "desc"
+      },
+      {
+        "field": "disaster_declaration_count",
+        "direction": "asc"
+      },
+      {
+        "field": "received_date",
+        "direction": "asc"
+      },
+      {
+        "field": "submission_id",
+        "direction": "asc"
+      }
+    ]
+  },
+  "investigation_profile_id": null,
+  "tool_policy": {
+    "allowed_tool_classes": [
+      "federato"
+    ],
+    "required_adapters": [
+      "federato"
+    ],
+    "optional_adapter_failure": "unavailable",
+    "max_calls": 40,
+    "timeout_seconds": 20
+  },
+  "source_plan": {
+    "resources": [
+      "Submission",
+      "Policy",
+      "Insured",
+      "Claim",
+      "Location",
+      "ExposureUnit"
+    ]
+  }
+}
