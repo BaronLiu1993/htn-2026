@@ -7,7 +7,7 @@ import {
   Activity, AlertTriangle, BookOpen, Check, ChevronDown, CircleX,
   Database, ListFilter, LoaderCircle, Play, RefreshCw, Search, Target, X,
 } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   AnalysisRunError,
   analyzeSubmissions,
@@ -364,8 +364,23 @@ function Guidelines({ packages, selectedId, onSelect }: { packages: GuidelinePac
   return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Guidelines</h1><p>Scope, eligibility gates, and target preferences for the selected package.</p></div><label className="uw-guideline-switch"><span className="uw-sr-only">Inspect guideline</span><select value={guideline.id} onChange={(event) => onSelect(event.target.value)}>{packages.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name}</option>)}</select></label></div><section className="uw-guideline-section"><h2>Scope</h2><p>{guideline.scope.description}. These criteria apply only to matching submissions.</p></section><RuleList title="Eligibility gates" rules={guideline.requirements} /><RuleList title="Target preferences" rules={guideline.preferences} /><p className="uw-support-note">{guideline.source}. Version {guideline.version}, effective {dateText(guideline.effective_from)}. Final coverage decisions remain human-owned.</p></main>;
 }
 
-function EmptyQueue({ running, onRun }: { running: boolean; onRun: () => void }) {
-  return <main className="uw-queue" aria-busy={running}><div className="uw-heading"><div><h1>Queue</h1><p>Assess available submissions against the active underwriting guideline.</p></div><div className="uw-heading-actions"><button className="uw-rerun" onClick={onRun} disabled={running}>{running ? <LoaderCircle size={13} className="uw-spin" /> : <Play size={13} />}{running ? "Running" : "Run"}</button></div></div><div className="uw-table-wrap"><div className="uw-empty uw-run-empty" role="status"><Database size={18} /><p>{running ? "Analyzing available submissions…" : "No analysis run yet."}</p>{!running && <small>Run the queue to assess and prioritize submissions.</small>}</div></div></main>;
+function ProcessingTimer({ startedAt }: { startedAt: number }) {
+  const [elapsedSeconds, setElapsedSeconds] = useState(() => Math.floor((Date.now() - startedAt) / 1000));
+
+  useEffect(() => {
+    const update = () => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000));
+    update();
+    const interval = window.setInterval(update, 1_000);
+    return () => window.clearInterval(interval);
+  }, [startedAt]);
+
+  const minutes = Math.floor(elapsedSeconds / 60).toString().padStart(2, "0");
+  const seconds = (elapsedSeconds % 60).toString().padStart(2, "0");
+  return <small className="uw-processing-timer" aria-live="off">Processing time {minutes}:{seconds}</small>;
+}
+
+function EmptyQueue({ running, startedAt, onRun }: { running: boolean; startedAt: number | null; onRun: () => void }) {
+  return <main className="uw-queue" aria-busy={running}><div className="uw-heading"><div><h1>Queue</h1><p>Assess available submissions against the active underwriting guideline.</p></div><div className="uw-heading-actions"><button className="uw-rerun" onClick={onRun} disabled={running}>{running ? <LoaderCircle size={13} className="uw-spin" /> : <Play size={13} />}{running ? "Running" : "Run"}</button></div></div><div className="uw-table-wrap"><div className="uw-empty uw-run-empty" role="status"><Database size={18} />{running && startedAt !== null && <ProcessingTimer startedAt={startedAt} />}<p>{running ? "Analyzing available submissions…" : "No analysis run yet."}</p>{!running && <small>Run the queue to assess and prioritize submissions.</small>}</div></div></main>;
 }
 
 export default function UnderwritingQueue() {
@@ -373,6 +388,7 @@ export default function UnderwritingQueue() {
   const [data, setData] = useState<LoadedData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
+  const [processingStartedAt, setProcessingStartedAt] = useState<number | null>(null);
   const [rerunning, setRerunning] = useState(false);
   const [failedRun, setFailedRun] = useState<FailedRunDetail | null>(null);
   const [selectedGuidelineId, setSelectedGuidelineId] = useState("");
@@ -390,6 +406,7 @@ export default function UnderwritingQueue() {
     if (rerun) setRerunning(true);
     else {
       setLoading(true);
+      setProcessingStartedAt(Date.now());
       setError(null);
     }
     try {
@@ -419,6 +436,7 @@ export default function UnderwritingQueue() {
       }
     } finally {
       setLoading(false);
+      setProcessingStartedAt(null);
       setRerunning(false);
     }
   }, [loadCatalog]);
@@ -431,5 +449,5 @@ export default function UnderwritingQueue() {
     }
   }, [loadCatalog, packages.length]);
 
-  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data && (data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>)}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{failedRun && data && <div className="uw-global-error uw-previous-run" role="alert"><AlertTriangle size={15} /><span><strong>Rerun {failedRun.run_id} failed.</strong> Showing the previous completed run from {dateText(data.run.created_at, true)}. {failedRun.errors.join(" · ")}</span></div>}{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={(next) => void openView(next)} run={data?.run} hasGuidelines /><div className="uw-content">{view === "guidelines" ? (packages.length > 0 ? <Guidelines packages={packages} selectedId={inspectedGuidelineId || packages[0].id} onSelect={setInspectedGuidelineId} /> : <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Guidelines</h1><p>Loading the installed underwriting packages…</p></div></div></main>) : !data ? <EmptyQueue running={loading} onRun={() => void load(false, undefined, selectedModel)} /> : view === "queue" ? <Queue data={data} selectedModel={selectedModel} onRerun={() => void load(true, selectedGuidelineId, selectedModel)} onGuidelineChange={(id) => void load(true, id, selectedModel)} onModelChange={(provider) => void load(true, selectedGuidelineId, provider)} rerunning={rerunning} /> : <RunActivity run={data.run} />}</div></div></div>;
+  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data && (data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>)}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{failedRun && data && <div className="uw-global-error uw-previous-run" role="alert"><AlertTriangle size={15} /><span><strong>Rerun {failedRun.run_id} failed.</strong> Showing the previous completed run from {dateText(data.run.created_at, true)}. {failedRun.errors.join(" · ")}</span></div>}{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={(next) => void openView(next)} run={data?.run} hasGuidelines /><div className="uw-content">{view === "guidelines" ? (packages.length > 0 ? <Guidelines packages={packages} selectedId={inspectedGuidelineId || packages[0].id} onSelect={setInspectedGuidelineId} /> : <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Guidelines</h1><p>Loading the installed underwriting packages…</p></div></div></main>) : !data ? <EmptyQueue running={loading} startedAt={processingStartedAt} onRun={() => void load(false, undefined, selectedModel)} /> : view === "queue" ? <Queue data={data} selectedModel={selectedModel} onRerun={() => void load(true, selectedGuidelineId, selectedModel)} onGuidelineChange={(id) => void load(true, id, selectedModel)} onModelChange={(provider) => void load(true, selectedGuidelineId, provider)} rerunning={rerunning} /> : <RunActivity run={data.run} />}</div></div></div>;
 }
