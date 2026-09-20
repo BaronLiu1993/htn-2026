@@ -217,7 +217,7 @@ After each result, read search_note. If it reports zero rows, the next query mus
 
 Every query purpose is shown to an underwriter. Write one short sentence. Name the evidence and why it matters. Example: "Need the total insured value for the commercial property submissions." Do not mention JSON, schemas, tool calls, canonical IDs, planning turns, or implementation details.
 
-If a Policy search leaves in-scope submissions with no Policy, the next query must change path. Expand Submission.insured.hq.buildings for those ids. Name, risk state, and building TIV can exist with no Policy. Premium, business type, and claims cannot.
+If insured name, risk state, building TIV, year built, or construction remain missing after a Policy search, the next query must change path. Expand Submission.insured.hq.buildings for those candidate ids even when a Policy exists. Premium, business type, and claims still require the linked Policy.
 
 The deterministic evaluator is authoritative. Preserve missing, conflicting, ambiguous, and unavailable facts. Do not claim external enrichment was performed unless a tool returned it. Grounding is strict: evidence_ids must be copied from that submission's allowed_evidence_ids. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Stop when all facts are verified, no useful candidate search remains, or the remaining budget is zero. Do not draft submission decisions before deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
 """
@@ -260,6 +260,29 @@ def _ledger_input(ledger: EvidenceLedger) -> dict[str, Any]:
 
 def _guideline_payload(guideline: GuidelinePackage) -> dict[str, Any]:
     return guideline.model_dump(mode="json")
+
+
+def _unsearched_evidence_resources(
+    search: EvidenceSearch,
+    guideline: GuidelinePackage,
+) -> list[str]:
+    unresolved_fact_ids = {
+        fact.fact_id
+        for ledger in search.ledgers
+        for fact in ledger.facts
+        if fact.state != "verified"
+    }
+    searched = set(search.coverage()["pagination_state"])
+    return sorted(
+        {
+            binding.resource
+            for definition in guideline.required_facts
+            if definition.id in unresolved_fact_ids
+            and (binding := search.mapper.bindings.get(definition.id)) is not None
+            and binding.status == "bound"
+            and binding.resource not in searched
+        }
+    )
 
 
 def _resource_phrase(resource: str, count: int) -> str:
@@ -627,7 +650,17 @@ class UnderwritingAgent:
                 },
             }
             if not force_report:
-                payload["tools"] = TOOL_DEFINITIONS
+                needs_binding = any(
+                    fact.id not in search.mapper.bindings
+                    or search.mapper.bindings[fact.id].status != "bound"
+                    for fact in selected_guideline.required_facts
+                )
+                payload["tools"] = [
+                    tool
+                    for tool in TOOL_DEFINITIONS
+                    if tool["name"] == "query_federato"
+                    or (tool["name"] == "bind_facts" and needs_binding)
+                ]
                 payload["parallel_tool_calls"] = False
             response = await self.transport.create(payload)
             elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
@@ -677,6 +710,27 @@ class UnderwritingAgent:
                     )
                     continue
                 await search.fill_headquarters(gateway)
+                unsearched = _unsearched_evidence_resources(
+                    search,
+                    selected_guideline,
+                )
+                if (
+                    unsearched
+                    and query_calls < self.settings.openai_max_query_calls
+                    and gateway.budget_remaining > 0
+                    and turn + 1 < self.settings.openai_max_turns
+                ):
+                    input_items.append(
+                        {
+                            "role": "user",
+                            "content": (
+                                "Unresolved guideline facts still have unsearched bound sources: "
+                                + ", ".join(unsearched)
+                                + ". Query the candidate-linked records before finishing."
+                            ),
+                        }
+                    )
+                    continue
                 text = _output_text(response)
                 if not text:
                     raise RuntimeError("OpenAI returned no structured agent report.")
@@ -730,6 +784,7 @@ class UnderwritingAgent:
                         query_calls += 1
                         result = await self._query_tool(
                             arguments=arguments,
+                            search=search,
                             registry=registry,
                             gateway=gateway,
                             trace=trace,
@@ -776,6 +831,7 @@ class UnderwritingAgent:
         self,
         *,
         arguments: dict[str, Any],
+        search: EvidenceSearch,
         registry: SchemaRegistry,
         gateway: ToolGateway,
         trace: list[TraceEvent],
@@ -795,6 +851,7 @@ class UnderwritingAgent:
                 raise QueryValidationError("Query must decode to a JSON object.")
             query.setdefault("pagination", {"limit": 100, "offset": 0})
             query = registry.coerce_query(query)
+            query = search.prepare_query(query)
             result = await gateway.query(query, purpose=purpose, fact_ids=fact_ids)
             return {
                 "ok": True,
