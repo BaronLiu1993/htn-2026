@@ -12,6 +12,46 @@ export interface EvidenceItem {
   field: string;
   value: unknown;
   label: string;
+  source_system: string;
+  source_date?: string | null;
+  observed_at?: string | null;
+  fact_id?: string | null;
+  state: EvidenceState;
+}
+
+export type EvidenceState =
+  | "verified"
+  | "missing"
+  | "conflicting"
+  | "ambiguous"
+  | "unavailable";
+
+export interface EvidenceObservation {
+  source_system: string;
+  resource: string;
+  record_id: string;
+  field_path: string;
+  value: unknown;
+  source_date?: string | null;
+  retrieved_at: string;
+  state: EvidenceState;
+}
+
+export interface EvidenceFact {
+  fact_id: string;
+  label: string;
+  value: unknown;
+  state: EvidenceState;
+  requirement_ids: string[];
+  observations: EvidenceObservation[];
+  note?: string | null;
+}
+
+export interface EvidenceLedger {
+  submission_id: string;
+  guideline_id: string;
+  guideline_version: string;
+  facts: EvidenceFact[];
 }
 
 export interface RuleOutcome {
@@ -26,8 +66,9 @@ export interface RuleOutcome {
 }
 
 export interface UnderwritingConsideration {
-  category: "construction" | "occupancy" | "protection" | "exposure";
-  status: "available" | "partial" | "missing";
+  category: string;
+  label?: string | null;
+  status: "available" | "partial" | "missing" | "unavailable";
   summary: string;
   appetite_rule_applied: boolean;
   evidence: EvidenceItem[];
@@ -53,12 +94,14 @@ export interface Assessment {
   recommended_action: string;
   explanation: string;
   evidence: EvidenceItem[];
+  ledger?: EvidenceLedger | null;
+  profile_considerations: UnderwritingConsideration[];
   cope: UnderwritingConsideration[];
   warnings: string[];
   run_id: string;
-  appetite_id: string;
-  appetite_version: string;
-  appetite_effective_date: string;
+  guideline_id: string;
+  guideline_version: string;
+  guideline_effective_date: string;
   explanation_source: "openai" | "deterministic";
 }
 
@@ -70,6 +113,8 @@ export interface QueueSubmission {
   premium?: number | null;
   tiv?: number | null;
   primary_state?: string | null;
+  line_of_business?: string | null;
+  scope_status: "applicable" | "not_applicable" | "not_evaluated";
   analysis_status: "not_analyzed";
 }
 
@@ -82,6 +127,9 @@ export interface TraceEvent {
   started_at: string;
   duration_ms: number;
   fields: string[];
+  fact_ids: string[];
+  adapter?: string | null;
+  budget_remaining?: number | null;
   result_summary: string;
   error?: string | null;
 }
@@ -94,24 +142,57 @@ export interface AnalysisRun {
   schema_source: "demo" | "live" | "cache";
   assessments: Assessment[];
   trace: TraceEvent[];
+  activity: TraceEvent[];
+  useful_fact_changes: number;
+  query_count: number;
   errors: string[];
-  appetite_id: string;
-  appetite_version: string;
-  appetite_effective_date: string;
+  guideline_id: string;
+  guideline_name: string;
+  guideline_version: string;
+  guideline_effective_date: string;
+  profile_id?: string | null;
+  total_submissions: number;
+  applicable_submissions: number;
+  not_applicable_submissions: number;
+  duration_ms: number;
+  tool_call_count: number;
+  unresolved_fact_count: number;
   agent_mode: "openai" | "openai_required";
   agent_model?: string | null;
   agent_summary?: string | null;
   agent_adaptations: string[];
 }
 
-export interface AppetiteStatus {
+export interface GuidelineSummary {
   id: string;
   name: string;
   version: string;
   effective_from: string;
+  effective_to?: string | null;
   source: string;
+  scope: string;
+  required_fact_count: number;
   requirement_count: number;
   preference_count: number;
+  investigation_profile_id?: string | null;
+  allowed_tools: string[];
+}
+
+export interface ProfileDomain {
+  id: string;
+  label: string;
+  fact_ids: string[];
+  questions: string[];
+}
+
+export interface InvestigationProfile {
+  id: string;
+  name: string;
+  version: string;
+  source: string;
+  domains: ProfileDomain[];
+  source_guidance: string[];
+  tool_suggestions: string[];
 }
 
 export interface HealthResponse {

@@ -1,0 +1,61 @@
+{
+  "id": "guideline-a",
+  "name": "Guideline A — 2025 Commercial Property",
+  "version": "2025.1",
+  "effective_from": "2025-01-01",
+  "effective_to": null,
+  "source": "Federato challenge 2025 commercial-property appetite",
+  "scope": {
+    "fact": "line_of_business",
+    "operator": "contains_normalized",
+    "value": "property",
+    "description": "Commercial property submissions"
+  },
+  "required_facts": [
+    {"id": "submission_type", "label": "Submission type", "source": {"resource": "Submission", "path": "submission_type"}},
+    {"id": "line_of_business", "label": "Line of business", "source": {"resource": "Policy", "path": "line_of_business"}},
+    {"id": "primary_state", "label": "Primary risk state", "source": {"resource": "Location", "path": "primary_state", "field": "state"}},
+    {"id": "tiv", "label": "Total insured value", "source": {"resource": "Policy", "path": "tiv"}},
+    {"id": "premium", "label": "Total premium", "source": {"resource": "Policy", "path": "premium"}},
+    {"id": "oldest_building_year", "label": "Oldest building year", "source": {"resource": "Building", "collection": "buildings", "field": "year_built", "operation": "minimum", "require_all": true}},
+    {"id": "acceptable_construction_share", "label": "Acceptable construction share", "source": {"resource": "Building", "collection": "buildings", "field": "construction_type", "operation": "weighted_match_share", "weight_field": "tiv", "match_values": ["joisted masonry", "non combustible", "noncombustible", "steel", "masonry non combustible", "masonry noncombustible"], "require_all": true}, "display": "percent"},
+    {"id": "five_year_loss_total", "label": "Five-year loss total", "source": {"resource": "Claim", "collection": "claims", "date_field": "loss_date", "field": "loss_value", "operation": "rolling_sum", "window_years": 5, "require_all": true}}
+  ],
+  "sufficiency": {"required_rule_kinds": ["requirement"], "unresolved_behavior": "needs_review"},
+  "requirements": [
+    {"id": "R1", "name": "New business", "fact": "submission_type", "operator": "in_normalized", "value": ["new", "new business", "newbusiness"], "expected": "New business; renewal is not acceptable", "missing_note": "Submission type is missing."},
+    {"id": "R2", "name": "Property line of business", "fact": "line_of_business", "operator": "contains_normalized", "value": "property", "expected": "Property", "missing_note": "Line of business is missing."},
+    {"id": "R3", "name": "Eligible primary risk state", "fact": "primary_state", "operator": "in", "value": ["OH", "PA", "MD", "CO", "CA", "FL", "NC", "SC", "GA", "VA", "UT"], "expected": "OH, PA, MD, CO, CA, FL, NC, SC, GA, VA, or UT", "missing_note": "Primary risk state is missing."},
+    {"id": "R4", "name": "TIV at or below $150M", "fact": "tiv", "operator": "lte", "value": 150000000, "expected": "At most $150M", "missing_note": "Total insured value is missing."},
+    {"id": "R5", "name": "Premium in acceptable range", "fact": "premium", "operator": "between", "value": [50000, 175000], "expected": "$50K-$175K inclusive", "missing_note": "Premium is missing."},
+    {"id": "R6", "name": "Buildings newer than 1990", "fact": "oldest_building_year", "operator": "gt", "value": 1990, "review_values": [1990], "expected": "Every relevant building newer than 1990", "missing_note": "One or more building years are missing.", "note": "Oldest relevant building controls; exactly 1990 is not classified by the supplied guide."},
+    {"id": "R7", "name": "Acceptable construction majority", "fact": "acceptable_construction_share", "operator": "gt", "value": 0.5, "review_values": [0.5], "expected": ">50% joisted masonry, non-combustible/steel, or masonry non-combustible", "missing_note": "One or more construction types are missing."},
+    {"id": "R8", "name": "Five-year loss value below $100K", "fact": "five_year_loss_total", "operator": "lt", "value": 100000, "review_values": [100000], "expected": "Aggregate applicable losses under $100K", "missing_note": "One or more claims lack a loss date or loss value.", "note": "Exactly $100K is not classified by the supplied guide."}
+  ],
+  "preferences": [
+    {"id": "P1", "name": "Target state", "fact": "primary_state", "operator": "in", "value": ["OH", "PA", "MD", "CO", "CA", "FL"], "expected": "OH, PA, MD, CO, CA, or FL"},
+    {"id": "P2", "name": "Target TIV", "fact": "tiv", "operator": "between", "value": [50000000, 100000000], "expected": "$50M-$100M inclusive"},
+    {"id": "P3", "name": "Target premium", "fact": "premium", "operator": "between", "value": [75000, 100000], "expected": "$75K-$100K inclusive"},
+    {"id": "P4", "name": "Buildings newer than 2010", "fact": "oldest_building_year", "operator": "gt", "value": 2010, "expected": "Every relevant building newer than 2010", "note": "Oldest relevant building controls."}
+  ],
+  "ranking": {
+    "status_order": ["target", "acceptable", "needs_review", "out_of_appetite"],
+    "tie_breakers": [
+      {"field": "target_matches", "direction": "desc"},
+      {"field": "evidence_completeness", "direction": "desc"},
+      {"field": "received_date", "direction": "asc"},
+      {"field": "submission_id", "direction": "asc"}
+    ]
+  },
+  "investigation_profile_id": "property-cope",
+  "tool_policy": {
+    "allowed_tool_classes": ["federato"],
+    "required_adapters": ["federato"],
+    "optional_adapter_failure": "unavailable",
+    "max_calls": 40,
+    "timeout_seconds": 20
+  },
+  "source_plan": {
+    "resources": ["Submission", "Policy", "Insured", "Claim", "ExposureUnit", "Location", "Building"]
+  }
+}

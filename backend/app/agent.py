@@ -2,20 +2,22 @@ from __future__ import annotations
 
 import json
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
+from .evidence_search import EvidenceSearch
 from uuid import uuid4
 
 from openai import AsyncOpenAI
 from pydantic import BaseModel, ConfigDict, Field
 
-from .appetite_loader import AppetitePack
 from .config import Settings
-from .demo_federato import query_demo
-from .federato_client import FederatoClient
-from .models import Assessment, TraceEvent
+from .adapters import DemoFederatoAdapter, FederatoAdapter
+from .guideline_registry import GuidelinePackage
+from .models import Assessment, EvidenceLedger, TraceEvent
+from .profile_registry import InvestigationProfile
 from .schema_registry import QueryValidationError, SchemaRegistry
+from .tool_gateway import ToolGateway
 
 
 class AgentExplanation(BaseModel):
@@ -80,9 +82,9 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "type": "function",
-        "name": "get_appetite",
+        "name": "get_guideline",
         "description": (
-            "Inspect the active versioned carrier appetite. The returned hard requirements are "
+            "Inspect the selected versioned guideline package. Its deterministic rules are "
             "authoritative and cannot be overridden by model judgment."
         ),
         "strict": True,
@@ -108,14 +110,22 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
             "properties": {
                 "purpose": {
                     "type": "string",
-                    "description": "Concise underwriting reason for requesting this evidence.",
+                    "description": (
+                        "One plain-English sentence for an underwriter. Name the evidence, the "
+                        "guideline criterion it supports, and why the check matters."
+                    ),
                 },
                 "query_json": {
                     "type": "string",
                     "description": "A JSON-encoded Federato query object.",
                 },
+                "fact_ids": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Unresolved canonical fact IDs this query can resolve.",
+                },
             },
-            "required": ["purpose", "query_json"],
+            "required": ["purpose", "query_json", "fact_ids"],
             "additionalProperties": False,
         },
     },
@@ -124,15 +134,17 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 SYSTEM_INSTRUCTIONS = """You are UnderwriteIQ's evidence-planning underwriting agent.
 
-Your job is to reason about what Federato evidence is needed to verify already-computed carrier-appetite outcomes. You must inspect the runtime schema and active appetite before querying. Construct queries dynamically from those tool results; never invent resources or fields. Use where before expansion, filter after expansion, $elemMatch at array boundaries, and expansion when a reference must be hydrated.
+Your job is to resolve canonical facts before deterministic evaluation. You receive the selected guideline, investigation profile, current evidence ledger, live schema digest, and remaining budget. Inspect the runtime schema and guideline before querying. Every query must name the unresolved fact IDs it can resolve. Construct queries dynamically from schema results; never invent resources or fields.
 
-Query syntax is exact: the expand stage is the reference tree itself, for example {"expand":{"policy":{"buildings":true,"claims":true}}}; never add another "expand" wrapper inside that tree. Sort entries are {"field":"premium","direction":"desc"}. Select is either a list of field paths or a nested projection object. For broad queue evidence, prefer a direct query of a discovered resource with IDs in $in, then expand only references declared on that resource.
+Every query purpose is shown directly to an underwriter. Write it as a short business explanation, for example: "Check five-year incurred losses because the guideline requires total losses below $100,000." Do not mention JSON, schemas, tool calls, canonical IDs, planning turns, or implementation details in that purpose.
 
-The deterministic appetite evaluator is authoritative. Never alter a status, target-match count, rule result, or recommendation. Your explanations may only summarize the supplied assessment facts and evidence returned by tools. Transparently identify missing data and contradictions. Do not claim external enrichment was performed unless a tool returned it.
+Query syntax is exact: the expand stage is the reference tree itself; never add another "expand" wrapper inside that tree. Sort entries are {"field":"name","direction":"asc"}. Select is either a list of field paths or a nested projection object. For broad queue evidence, prefer a direct query of a discovered resource with IDs in $in, then expand only references declared on that resource.
 
-Grounding is strict: for each explanation, evidence_ids must be a subset of that same assessment's allowed_evidence_ids. Copy those IDs exactly. A related Policy, Building, or Claim ID returned by a query is not an allowed citation unless that exact ID also appears in allowed_evidence_ids. Tool results may inform the prose, but they do not expand the citation allowlist.
+The deterministic evaluator runs after evidence gathering and is authoritative. You cannot change rule outcomes. Preserve missing, conflicting, ambiguous, and unavailable facts. Do not claim external enrichment was performed unless a tool returned it.
 
-Before finishing, call inspect_schema, get_appetite, and query_federato at least once. Prefer a broad queue query followed by a focused query only when the first result shows missing or contradictory evidence. Keep each query purpose concise. Return a short, underwriter-friendly explanation for every supplied assessment. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
+Grounding is strict: for each explanation, evidence_ids must be a subset of that same submission's allowed_evidence_ids. Copy those IDs exactly. A related record ID returned by a query is not an allowed citation unless that exact ID also appears in allowed_evidence_ids. Tool results may inform the prose, but they do not expand the citation allowlist.
+
+The initial message includes the live schema and complete selected guideline. You can inspect them again if useful. Query in batches across the complete queue. Retain id and relationship fields on every returned record, including expanded records, so evidence can be attributed. Do not aggregate or rename fields: the ledger computes the guideline aggregates from source observations. Retrieve the next page when a page is full. After each query, use the updated ledger coverage to choose the next useful search. Stop when all facts are verified, no useful search remains, or the remaining budget is zero. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Prefer a broad queue query followed by a focused query only when the first result shows missing or contradictory evidence. Keep each query purpose concise. Do not draft submission decisions before the deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
 """
 
 
@@ -157,14 +169,22 @@ def _assessment_input(assessment: Assessment) -> dict[str, Any]:
     }
 
 
-def _appetite_payload(appetite: AppetitePack) -> dict[str, Any]:
+def _ledger_input(ledger: EvidenceLedger) -> dict[str, Any]:
     return {
-        "id": appetite.id,
-        "version": appetite.version,
-        "effective_from": appetite.effective_from.isoformat(),
-        "requirements": [rule.model_dump(mode="json") for rule in appetite.requirements],
-        "preferences": [rule.model_dump(mode="json") for rule in appetite.preferences],
+        "submission_id": ledger.submission_id,
+        "facts": [fact.model_dump(mode="json") for fact in ledger.facts],
+        "allowed_evidence_ids": sorted(
+            {
+                observation.record_id
+                for fact in ledger.facts
+                for observation in fact.observations
+            }
+        ),
     }
+
+
+def _guideline_payload(guideline: GuidelinePackage) -> dict[str, Any]:
+    return guideline.model_dump(mode="json")
 
 
 def _output_text(response: dict[str, Any]) -> str:
@@ -180,7 +200,7 @@ def _output_text(response: dict[str, Any]) -> str:
     return ""
 
 
-def _bounded_tool_result(value: Any, max_chars: int = 18_000) -> str:
+def _bounded_tool_result(value: Any, max_chars: int = 300_000) -> str:
     encoded = json.dumps(value, default=str, separators=(",", ":"))
     if len(encoded) <= max_chars:
         return encoded
@@ -214,6 +234,7 @@ class AgentRunResult:
     report: AgentReport
     model: str
     tool_calls: int
+    query_results: list[dict[str, Any]] = field(default_factory=list)
 
 
 class UnderwritingAgent:
@@ -229,21 +250,44 @@ class UnderwritingAgent:
     async def run(
         self,
         *,
-        assessments: list[Assessment],
+        search: EvidenceSearch,
+        assessments: list[Assessment] | None = None,
+        ledgers: list[EvidenceLedger] | None = None,
         registry: SchemaRegistry,
-        appetite: AppetitePack,
-        federato: FederatoClient,
+        guideline: GuidelinePackage,
+        profile: InvestigationProfile | None = None,
+        gateway: ToolGateway | None = None,
+        federato: Any = None,
         mode: str,
         trace: list[TraceEvent],
     ) -> AgentRunResult:
+        selected_guideline = guideline
+        if gateway is None:
+            if mode != "demo" and federato is None:
+                raise ValueError("A gateway or source adapter is required for live mode.")
+            adapter = DemoFederatoAdapter() if mode == "demo" else FederatoAdapter(federato)
+            gateway = ToolGateway([adapter], selected_guideline.tool_policy, trace)
+            gateway.registry = registry
+        inputs = (
+            [_assessment_input(item) for item in assessments]
+            if assessments is not None
+            else [_ledger_input(item) for item in ledgers or []]
+        )
         prompt = {
             "goal": (
-                "Verify the queue's appetite evidence, adapt queries if needed, and explain every "
-                "deterministic decision in plain English."
+                "Resolve useful evidence gaps before deterministic evaluation. Summarize the search."
             ),
+            "schema": registry.compact_digest(),
+            "selected_guideline": _guideline_payload(guideline),
             "mode": mode,
-            "assessment_count": len(assessments),
-            "assessments": [_assessment_input(item) for item in assessments],
+            "guideline": {
+                "id": selected_guideline.id,
+                "version": selected_guideline.version,
+            },
+            "reference_library": [profile.model_dump(mode="json")] if profile else [],
+            "remaining_tool_budget": gateway.budget_remaining,
+            "submission_count": len(inputs),
+            "submissions": inputs,
         }
         input_items: list[dict[str, Any]] = [
             {
@@ -251,19 +295,19 @@ class UnderwritingAgent:
                 "content": json.dumps(prompt, separators=(",", ":")),
             }
         ]
-        called_tools: set[str] = set()
+        called_tools: set[str] = {"inspect_schema", "get_guideline"}
         query_calls = 0
         total_tool_calls = 0
+        query_results: list[dict[str, Any]] = []
         response_schema = AgentReport.model_json_schema()
 
         for turn in range(self.settings.openai_max_turns):
-            required_tools_called = {
-                "inspect_schema",
-                "get_appetite",
-                "query_federato",
-            }.issubset(called_tools)
+            guideline_called = "get_guideline" in called_tools
             force_report = (
-                turn == self.settings.openai_max_turns - 1 and required_tools_called
+                turn == self.settings.openai_max_turns - 1
+                or query_calls >= self.settings.openai_max_query_calls
+                or gateway.budget_remaining == 0
+                or search.coverage()["unresolved_fact_count"] == 0
             )
             if force_report:
                 input_items.append(
@@ -301,21 +345,24 @@ class UnderwritingAgent:
                 TraceEvent(
                     id=f"trace_{uuid4().hex[:10]}",
                     tool="openai_agent",
-                    purpose=f"Agent planning turn {turn + 1}",
+                    purpose="Decide which underwriting evidence to check next",
                     status="success",
                     started_at=datetime.now(),
                     duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
                     result_summary=(
-                        f"Model requested {len(calls)} tool call(s)"
+                        "The agent identified another evidence check that could resolve a "
+                        "guideline question"
                         if calls
-                        else "Model produced a structured underwriting report"
+                        else "The agent completed its evidence review and prepared submission explanations"
                     ),
                 )
             )
 
             if not calls:
-                missing_tools = {"inspect_schema", "get_appetite", "query_federato"} - called_tools
-                if missing_tools and turn + 1 < self.settings.openai_max_turns:
+                missing_tools = {"inspect_schema", "query_federato"} - called_tools
+                if not guideline_called:
+                    missing_tools.add("get_guideline")
+                if missing_tools and not force_report and turn + 1 < self.settings.openai_max_turns:
                     input_items.append(
                         {
                             "role": "user",
@@ -334,6 +381,7 @@ class UnderwritingAgent:
                     report=report,
                     model=str(response.get("model") or self.settings.openai_model),
                     tool_calls=total_tool_calls,
+                    query_results=query_results,
                 )
 
             input_items.extend(_function_call_input(call) for call in calls)
@@ -348,18 +396,26 @@ class UnderwritingAgent:
                 else:
                     if name == "inspect_schema":
                         result = {"ok": True, **registry.compact_digest()}
-                    elif name == "get_appetite":
-                        result = {"ok": True, "appetite": _appetite_payload(appetite)}
+                    elif name == "get_guideline":
+                        result = {"ok": True, "guideline": _guideline_payload(selected_guideline)}
                     elif name == "query_federato":
                         query_calls += 1
                         result = await self._query_tool(
                             arguments=arguments,
                             registry=registry,
-                            federato=federato,
-                            mode=mode,
+                            gateway=gateway,
                             trace=trace,
                             query_calls=query_calls,
                         )
+                        if result.get("ok"):
+                            query_results.append(result)
+                            feedback = search.apply(result)
+                            result = {"ok": True, "query": result["query"], **feedback,
+                                      "remaining_query_budget": min(gateway.budget_remaining, self.settings.openai_max_query_calls - query_calls)}
+                            trace[-1].result_summary = (
+                                f"Found {feedback['records_found']} related records. "
+                                f"Updated {feedback['useful_fact_changes']} underwriting answers."
+                            )
                     else:
                         result = {"ok": False, "error": f'Unknown tool "{name}".'}
                 input_items.append(
@@ -376,12 +432,12 @@ class UnderwritingAgent:
         *,
         arguments: dict[str, Any],
         registry: SchemaRegistry,
-        federato: FederatoClient,
-        mode: str,
+        gateway: ToolGateway,
         trace: list[TraceEvent],
         query_calls: int,
     ) -> dict[str, Any]:
         purpose = str(arguments.get("purpose") or "Inspect underwriting evidence")[:240]
+        fact_ids = [str(item) for item in arguments.get("fact_ids", [])][:40]
         started = time.perf_counter()
         if query_calls > self.settings.openai_max_query_calls:
             return {
@@ -392,74 +448,34 @@ class UnderwritingAgent:
             query = json.loads(str(arguments.get("query_json") or ""))
             if not isinstance(query, dict):
                 raise QueryValidationError("Query must decode to a JSON object.")
-            query.setdefault("pagination", {"limit": 25, "offset": 0})
+            query.setdefault("pagination", {"limit": 100, "offset": 0})
             registry.validate_query(query)
-            result = query_demo(query) if mode == "demo" else await federato.query(query)
-            summary = _query_summary(result)
-            trace.append(
-                TraceEvent(
-                    id=f"trace_{uuid4().hex[:10]}",
-                    tool="agent_query_federato",
-                    purpose=purpose,
-                    status="success",
-                    started_at=datetime.now(),
-                    duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                    fields=_selected_fields(query),
-                    result_summary=summary,
-                )
-            )
-            return {"ok": True, "query": query, "result": result}
+            result = await gateway.query(query, purpose=purpose, fact_ids=fact_ids)
+            return {
+                "ok": True,
+                "query": query,
+                "fact_ids": fact_ids,
+                "result": result,
+            }
         except (json.JSONDecodeError, QueryValidationError) as exc:
             trace.append(
                 TraceEvent(
                     id=f"trace_{uuid4().hex[:10]}",
-                    tool="agent_query_federato",
-                    purpose=purpose,
+                    tool="query_guidance",
+                    purpose="Refine an evidence search that did not match the available data",
                     status="failure",
                     started_at=datetime.now(),
                     duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                    result_summary="Rejected an invalid agent-generated query",
+                    result_summary="The proposed search used unavailable fields, so the agent must revise it.",
+                    fact_ids=fact_ids,
+                    adapter="federato",
+                    budget_remaining=gateway.budget_remaining,
                     error=str(exc),
                 )
             )
             return {"ok": False, "error": str(exc), "repairable": True}
         except Exception as exc:
-            trace.append(
-                TraceEvent(
-                    id=f"trace_{uuid4().hex[:10]}",
-                    tool="agent_query_federato",
-                    purpose=purpose,
-                    status="failure",
-                    started_at=datetime.now(),
-                    duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                    result_summary="Federato query failed",
-                    error=str(exc),
-                )
-            )
             return {"ok": False, "error": "Federato query failed safely.", "repairable": True}
-
-
-def _selected_fields(query: dict[str, Any]) -> list[str]:
-    select = query.get("select")
-    if isinstance(select, list):
-        return [item for item in select if isinstance(item, str)][:40]
-    if isinstance(select, dict):
-        return list(select)[:40]
-    return []
-
-
-def _query_summary(result: Any) -> str:
-    if isinstance(result, dict):
-        total = result.get("total")
-        resource = result.get("resource", "records")
-        if isinstance(total, int):
-            return f"Retrieved {total} matching {resource} records"
-        for key in ("records", "results", "items", "groups", "data"):
-            if isinstance(result.get(key), list):
-                return f"Retrieved {len(result[key])} {resource} result rows"
-    if isinstance(result, list):
-        return f"Retrieved {len(result)} result rows"
-    return "Federato query completed"
 
 
 def apply_agent_report(

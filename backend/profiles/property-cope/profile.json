@@ -1,0 +1,14 @@
+{
+  "id": "property-cope",
+  "name": "Property COPE",
+  "version": "2025.1",
+  "source": "IRMI COPE definition",
+  "domains": [
+    {"id": "construction", "label": "Construction", "fact_ids": ["oldest_building_year", "acceptable_construction_share"], "questions": ["What is each building's construction and year built?"]},
+    {"id": "occupancy", "label": "Occupancy", "fact_ids": [], "questions": ["What operations occur at each location?"]},
+    {"id": "protection", "label": "Protection", "fact_ids": [], "questions": ["What fire-protection systems and public protection class apply?"]},
+    {"id": "exposure", "label": "Exposure", "fact_ids": ["primary_state"], "questions": ["Which natural-hazard and nearby exposures apply?"]}
+  ],
+  "source_guidance": ["Use Federato records as the primary evidence source."],
+  "tool_suggestions": ["federato"]
+}

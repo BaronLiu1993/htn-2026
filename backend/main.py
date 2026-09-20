@@ -4,22 +4,23 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 from .app.config import settings
+from .app.guideline_registry import GuidelinePackage, GuidelineSummary
 from .app.models import (
     AnalysisRun,
-    AppetiteStatus,
     BatchAnalysisRequest,
     HealthResponse,
     QueueSubmission,
     SchemaStatus,
     TraceEvent,
 )
+from .app.profile_registry import InvestigationProfile
 from .app.service import UnderwriteService
 
 
 app = FastAPI(
     title="UnderwriteIQ API",
     version="0.1.0",
-    description="Federato-first commercial property submission triage.",
+    description="Guideline-agnostic Federato underwriting triage.",
 )
 app.add_middleware(
     CORSMiddleware,
@@ -51,12 +52,24 @@ async def schema_status() -> SchemaStatus:
     return await service.schema_status()
 
 
-@app.get("/api/appetite/status", response_model=AppetiteStatus)
-async def appetite_status() -> AppetiteStatus:
+@app.get("/api/guidelines", response_model=list[GuidelineSummary])
+async def guidelines() -> list[GuidelineSummary]:
+    return service.list_guidelines()
+
+
+@app.get("/api/guidelines/{guideline_id}", response_model=GuidelinePackage)
+async def guideline(
+    guideline_id: str, version: str | None = None
+) -> GuidelinePackage:
     try:
-        return service.appetite_status()
-    except Exception as exc:
-        raise HTTPException(status_code=500, detail=f"Invalid appetite configuration: {exc}") from exc
+        return service.get_guideline(guideline_id, version)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.get("/api/profiles", response_model=list[InvestigationProfile])
+async def profiles() -> list[InvestigationProfile]:
+    return service.profiles.list()
 
 
 @app.get("/api/submissions", response_model=list[QueueSubmission])

@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 AssessmentStatus = Literal[
     "target", "acceptable", "needs_review", "out_of_appetite"
 ]
+EvidenceState = Literal["verified", "missing", "conflicting", "ambiguous", "unavailable"]
 RuleState = Literal["passed", "failed", "matched", "not_matched", "unresolved"]
 TraceStatus = Literal["success", "retry", "failure", "cached"]
 AgentMode = Literal["openai", "openai_required"]
@@ -47,6 +48,7 @@ class SubmissionEvidence(BaseModel):
     buildings: list[BuildingEvidence] = Field(default_factory=list)
     claims: list[ClaimEvidence] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
+    raw_records: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     source_records: dict[str, list[str]] = Field(default_factory=dict)
 
 
@@ -56,6 +58,42 @@ class EvidenceItem(BaseModel):
     field: str
     value: Any
     label: str
+    source_system: str = "federato"
+    source_date: date | None = None
+    observed_at: datetime | None = None
+    fact_id: str | None = None
+    state: EvidenceState = "verified"
+
+
+class EvidenceObservation(BaseModel):
+    source_system: str
+    resource: str
+    record_id: str
+    field_path: str
+    value: Any = None
+    source_date: date | None = None
+    retrieved_at: datetime
+    state: EvidenceState = "verified"
+
+
+class EvidenceFact(BaseModel):
+    fact_id: str
+    label: str
+    value: Any = None
+    state: EvidenceState
+    requirement_ids: list[str] = Field(default_factory=list)
+    observations: list[EvidenceObservation] = Field(default_factory=list)
+    note: str | None = None
+
+
+class EvidenceLedger(BaseModel):
+    submission_id: str
+    guideline_id: str
+    guideline_version: str
+    facts: list[EvidenceFact]
+
+    def fact(self, fact_id: str) -> EvidenceFact | None:
+        return next((item for item in self.facts if item.fact_id == fact_id), None)
 
 
 class RuleOutcome(BaseModel):
@@ -70,8 +108,9 @@ class RuleOutcome(BaseModel):
 
 
 class UnderwritingConsideration(BaseModel):
-    category: Literal["construction", "occupancy", "protection", "exposure"]
-    status: Literal["available", "partial", "missing"]
+    category: str
+    label: str | None = None
+    status: Literal["available", "partial", "missing", "unavailable"]
     summary: str
     appetite_rule_applied: bool = False
     evidence: list[EvidenceItem] = Field(default_factory=list)
@@ -86,6 +125,9 @@ class TraceEvent(BaseModel):
     started_at: datetime
     duration_ms: int
     fields: list[str] = Field(default_factory=list)
+    fact_ids: list[str] = Field(default_factory=list)
+    adapter: str | None = None
+    budget_remaining: int | None = None
     result_summary: str
     error: str | None = None
 
@@ -110,12 +152,14 @@ class Assessment(BaseModel):
     recommended_action: str
     explanation: str
     evidence: list[EvidenceItem] = Field(default_factory=list)
+    ledger: EvidenceLedger | None = None
+    profile_considerations: list[UnderwritingConsideration] = Field(default_factory=list)
     cope: list[UnderwritingConsideration] = Field(default_factory=list)
     warnings: list[str] = Field(default_factory=list)
     run_id: str = ""
-    appetite_id: str
-    appetite_version: str
-    appetite_effective_date: date
+    guideline_id: str
+    guideline_version: str
+    guideline_effective_date: date
     explanation_source: Literal["openai", "deterministic"] = "deterministic"
 
 
@@ -127,12 +171,16 @@ class QueueSubmission(BaseModel):
     premium: float | None = None
     tiv: float | None = None
     primary_state: str | None = None
+    line_of_business: str | None = None
+    scope_status: Literal["applicable", "not_applicable", "not_evaluated"] = "not_evaluated"
     analysis_status: Literal["not_analyzed"] = "not_analyzed"
 
 
 class BatchAnalysisRequest(BaseModel):
     submission_ids: list[str] | None = None
     force_schema_refresh: bool = False
+    guideline_id: str
+    guideline_version: str | None = None
 
 
 class AnalysisRun(BaseModel):
@@ -144,9 +192,20 @@ class AnalysisRun(BaseModel):
     assessments: list[Assessment]
     trace: list[TraceEvent]
     errors: list[str] = Field(default_factory=list)
-    appetite_id: str
-    appetite_version: str
-    appetite_effective_date: date
+    guideline_id: str
+    guideline_name: str
+    guideline_version: str
+    guideline_effective_date: date
+    profile_id: str | None = None
+    total_submissions: int = 0
+    applicable_submissions: int = 0
+    not_applicable_submissions: int = 0
+    duration_ms: int = 0
+    tool_call_count: int = 0
+    unresolved_fact_count: int = 0
+    useful_fact_changes: int = 0
+    query_count: int = 0
+    activity: list[TraceEvent] = Field(default_factory=list)
     agent_mode: AgentMode = "openai_required"
     agent_model: str | None = None
     agent_summary: str | None = None
@@ -159,16 +218,6 @@ class SchemaStatus(BaseModel):
     cached: bool
     resource_count: int
     source: Literal["demo", "live", "cache", "not_loaded"]
-
-
-class AppetiteStatus(BaseModel):
-    id: str
-    name: str
-    version: str
-    effective_from: date
-    source: str
-    requirement_count: int
-    preference_count: int
 
 
 class HealthResponse(BaseModel):

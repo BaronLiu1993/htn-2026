@@ -7,9 +7,9 @@ import {
   Database, ListFilter, LoaderCircle, RefreshCw, Search, Target, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeSubmissions, fetchAppetiteStatus, fetchHealth, fetchSubmissions } from "../../lib/api";
+import { analyzeSubmissions, fetchGuidelines, fetchHealth, fetchSubmissions } from "../../lib/api";
 import type {
-  AnalysisRun, AppetiteStatus, Assessment, AssessmentStatus, EvidenceItem,
+  AnalysisRun, Assessment, AssessmentStatus, EvidenceItem, GuidelineSummary,
   HealthResponse, QueueSubmission, RuleOutcome, TraceEvent, UnderwritingConsideration,
 } from "../../lib/types";
 import "./underwriting-queue.css";
@@ -17,7 +17,7 @@ import "./underwriting-queue.css";
 type View = "queue" | "activity" | "guidelines";
 type Group = "Pursue" | "Investigate" | "Out of appetite";
 type StatusFilter = AssessmentStatus | null;
-type LoadedData = { health: HealthResponse; submissions: QueueSubmission[]; appetite: AppetiteStatus; run: AnalysisRun };
+type LoadedData = { health: HealthResponse; submissions: QueueSubmission[]; guidelines: GuidelineSummary[]; guideline: GuidelineSummary; run: AnalysisRun };
 type DisplayEvidence = {
   id: string; sourceKey: string; claim: string; record: string; field: string; value: string;
   ruleName: string; expected: string; note?: string; preview: string;
@@ -207,7 +207,7 @@ function TraceList({ events, emptyLabel }: { events: TraceEvent[]; emptyLabel: s
   return <ol className="uw-trace-list">{events.map((event) => (
     <li key={event.id}>
       <span className={`uw-trace-status ${event.status}`} aria-hidden="true" />
-      <div><div className="uw-trace-head"><strong>{event.purpose}</strong><time dateTime={event.started_at}>{dateText(event.started_at, true)}</time></div><p>{event.result_summary}</p><small>{event.tool} · {event.duration_ms} ms · {event.status}</small>{event.error && <p className="uw-trace-error">{event.error}</p>}</div>
+      <div><div className="uw-trace-head"><strong>{event.purpose}</strong><time dateTime={event.started_at}>{dateText(event.started_at, true)}</time></div><p>{event.result_summary}</p><small>{event.status === "failure" ? "Evidence check failed" : "Evidence check complete"} · {(event.duration_ms / 1000).toFixed(1)} sec</small>{event.error && <p className="uw-trace-error">{event.error}</p>}</div>
     </li>
   ))}</ol>;
 }
@@ -227,11 +227,11 @@ function Review({ assessment, run }: { assessment: Assessment; run: AnalysisRun 
     ...evidenceFor(evidence, ["premium"]).slice(0, 1),
     ...preferences,
   ].filter((item, index, items) => items.findIndex((candidate) => candidate.id === item.id) === index);
-  const trace = run.trace.filter((event) => event.submission_id === assessment.submission_id || !event.submission_id);
+  const trace = run.activity.filter((event) => event.submission_id === assessment.submission_id || !event.submission_id);
   const issues = [...assessment.missing_information, ...assessment.warnings];
 
   return <div className="uw-review">
-    <div className="uw-review-identity"><div><div className="uw-section-kicker">Submission {assessment.submission_number}</div><Dialog.Title>{assessment.insured_name}</Dialog.Title><p>Commercial property · {assessment.primary_state ?? "State not available"} · USD</p></div><Badge assessment={assessment} /></div>
+    <div className="uw-review-identity"><div><div className="uw-section-kicker">Submission {assessment.submission_number}</div><Dialog.Title>{assessment.insured_name}</Dialog.Title><p>{run.guideline_name ?? "Selected guideline"} · {assessment.primary_state ?? "State not available"} · USD</p></div><Badge assessment={assessment} /></div>
     <div className="uw-next-action"><span>Recommended action</span><strong>{assessment.recommended_action}</strong></div>
     <section className="uw-assessment-summary">
       <div className="uw-section-kicker">Assessment</div>
@@ -255,7 +255,7 @@ function Review({ assessment, run }: { assessment: Assessment; run: AnalysisRun 
       const records = copeEvidence(item);
       return <div key={item.category}><span>{item.category}</span><p>{item.summary}</p>{records.length ? <Bundle items={records} label={`${records.length} ${records.length === 1 ? "source" : "sources"}`} demo={run.mode === "demo"} /> : <small>Not available</small>}</div>;
     })}</section>
-    <details className="uw-agent-activity"><summary><span><Activity size={15} />Agent activity</span><span>{trace.length} returned events <ChevronDown size={14} /></span></summary><div className="uw-activity-body">{run.agent_summary && <p>{run.agent_summary}</p>}<TraceList events={trace} emptyLabel="No trace events were returned for this account." /></div></details>
+    <details className="uw-agent-activity"><summary><span><Activity size={15} />Agent activity</span><span>{trace.length} review updates <ChevronDown size={14} /></span></summary><div className="uw-activity-body">{run.agent_summary && <p>{run.agent_summary}</p>}<TraceList events={trace} emptyLabel="No trace events were returned for this account." /></div></details>
     <div className="uw-review-action"><button className="uw-primary" onClick={() => setActionOpen((open) => !open)}>{actionOpen ? "Hide review checklist" : assessment.recommended_action}<span>↗</span></button>{actionOpen && <div role="status" className="uw-action-result"><strong>Human review required</strong><p>Confirm the returned evidence and document the underwriting decision. This queue does not approve or decline coverage.</p></div>}</div>
   </div>;
 }
@@ -269,8 +269,8 @@ function Sidebar({ view, onView, run }: { view: View; onView: (view: View) => vo
   return <aside className="uw-sidebar" aria-label="Underwriting navigation"><nav><button aria-current={view === "queue" ? "page" : undefined} onClick={() => onView("queue")}><ListFilter size={16} />Queue</button><button aria-current={view === "activity" ? "page" : undefined} onClick={() => onView("activity")}><Activity size={16} />Run activity</button></nav><div className="uw-sidebar-secondary"><button aria-current={view === "guidelines" ? "page" : undefined} onClick={() => onView("guidelines")}><BookOpen size={16} />Guidelines</button><div className="uw-data-state"><span />{run.mode === "demo" ? "Demo data" : "Live data"}<small>{run.assessments.length} assessed submissions</small></div></div></aside>;
 }
 
-function Queue({ data, onRerun, rerunning }: { data: LoadedData; onRerun: () => void; rerunning: boolean }) {
-  const { run, appetite } = data;
+function Queue({ data, onRerun, onGuidelineChange, rerunning }: { data: LoadedData; onRerun: () => void; onGuidelineChange: (id: string) => void; rerunning: boolean }) {
+  const { run, guideline, guidelines } = data;
   const [group, setGroup] = useState<Group>("Pursue");
   const [status, setStatus] = useState<StatusFilter>(null);
   const [search, setSearch] = useState("");
@@ -290,7 +290,7 @@ function Queue({ data, onRerun, rerunning }: { data: LoadedData; onRerun: () => 
   }
 
   return <main className="uw-queue">
-    <div className="uw-heading"><div><h1>Queue</h1><p>{assessments.length} submissions · {eligible} eligible · {unresolved} unresolved · {excluded} excluded</p></div><div className="uw-heading-actions"><span className="uw-rubric-state">{appetite.name} · {appetite.version}</span><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
+    <div className="uw-heading"><div><h1>Queue</h1><p>{assessments.length} submissions · {eligible} eligible · {unresolved} unresolved · {excluded} excluded</p></div><div className="uw-heading-actions"><label className="uw-guideline-switch"><span className="uw-sr-only">Selected guideline</span><select value={guideline.id} onChange={(event) => onGuidelineChange(event.target.value)} disabled={rerunning}>{guidelines.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name} · {item.version}</option>)}</select></label><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
     {run.status === "partial" && <div className="uw-inline-banner warning" role="status"><AlertTriangle size={16} /><div><strong>Partial analysis run</strong><p>{run.errors.join(" · ") || "Some submissions could not be assessed."}</p></div></div>}
     <section className="uw-status-cards" aria-label="Filter queue by appetite status">{cards.map((card) => {
       const Icon = card.icon;
@@ -299,16 +299,16 @@ function Queue({ data, onRerun, rerunning }: { data: LoadedData; onRerun: () => 
     })}</section>
     <div className="uw-toolbar"><div className="uw-filters" aria-label="Action groups">{groups.map((item) => <button key={item} aria-pressed={group === item && status === null} data-current-group={group === item ? "" : undefined} onClick={() => { setGroup(item); setStatus(null); }}>{item}<span>{assessments.filter((assessment) => groupFor(assessment.status) === item).length}</span></button>)}</div><label className="uw-search"><span className="uw-sr-only">Search accounts</span><Search size={14} /><input placeholder="Search accounts…" value={search} onChange={(event) => setSearch(event.target.value)} /></label></div>
     <div className="uw-table-wrap"><table><thead><tr><th>Account / assessment</th><th>Appetite</th><th>Target fit</th><th>Premium</th><th>Received</th><th>Next step</th></tr></thead><tbody>{rows.map((item) => <tr key={item.submission_id}><td><strong>{item.insured_name}</strong><small>{item.submission_number} · {item.primary_state ?? "State unavailable"} · {money(item.tiv)} TIV</small><p>{item.explanation}</p></td><td><Badge assessment={item} /></td><td>{item.status === "target" || item.status === "acceptable" ? <><strong>{item.target_matches} of {item.target_preferences_total}</strong><small>target preferences</small></> : <span className="uw-muted">Not scored</span>}</td><td>{money(item.premium)}</td><td>{dateText(item.received_date)}</td><td><AccountReview assessment={item} run={run} /></td></tr>)}</tbody></table>{!rows.length && <div className="uw-empty"><Database size={18} /><p>No accounts match this filter.</p><button onClick={() => { setSearch(""); setStatus(null); }}>Clear filters</button></div>}</div>
-    <div className="uw-footnote"><span>{appetite.name} · effective {dateText(appetite.effective_from)}</span><span>Recommendations require human review.</span></div>
+    <div className="uw-footnote"><span>{guideline.name} · effective {dateText(guideline.effective_from)}</span><span>Recommendations require human review.</span></div>
   </main>;
 }
 
 function RunActivity({ run }: { run: AnalysisRun }) {
-  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Run activity</h1><p>Returned trace events for run {run.run_id}.</p></div><span className="uw-rubric-state">{run.status}</span></div><div className="uw-run-summary"><div><span>Created</span><strong>{dateText(run.created_at, true)}</strong></div><div><span>Agent</span><strong>{run.agent_model ?? run.agent_mode}</strong></div><div><span>Schema</span><strong>{run.schema_source}</strong></div></div>{run.agent_summary && <p className="uw-support-note">{run.agent_summary}</p>}{run.agent_adaptations.length > 0 && <ul className="uw-adaptations">{run.agent_adaptations.map((item) => <li key={item}>{item}</li>)}</ul>}<TraceList events={run.trace} emptyLabel="This run did not return trace events." />{run.errors.length > 0 && <div className="uw-inline-banner warning"><AlertTriangle size={16} /><div><strong>Run errors</strong><p>{run.errors.join(" · ")}</p></div></div>}</main>;
+  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Run activity</h1><p>Evidence checks and decisions for this queue.</p></div><span className="uw-rubric-state">{run.status}</span></div><div className="uw-run-summary"><div><span>Created</span><strong>{dateText(run.created_at, true)}</strong></div><div><span>Agent</span><strong>{run.agent_model ?? run.agent_mode}</strong></div><div><span>Evidence checks</span><strong>{run.query_count}</strong></div></div>{run.agent_summary && <p className="uw-support-note">{run.agent_summary}</p>}{run.agent_adaptations.length > 0 && <ul className="uw-adaptations">{run.agent_adaptations.map((item) => <li key={item}>{item}</li>)}</ul>}<TraceList events={run.activity} emptyLabel="This run did not return trace events." />{run.errors.length > 0 && <div className="uw-inline-banner warning"><AlertTriangle size={16} /><div><strong>Run errors</strong><p>{run.errors.join(" · ")}</p></div></div>}</main>;
 }
 
-function Guidelines({ appetite }: { appetite: AppetiteStatus }) {
-  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>{appetite.name}</h1><p>Carrier appetite metadata returned by the backend.</p></div></div><div className="uw-guideline-list"><section><span>1</span><div><h2>Version</h2><p>{appetite.version}</p></div></section><section><span>2</span><div><h2>Effective date</h2><p>{dateText(appetite.effective_from)}</p></div></section><section><span>3</span><div><h2>Rule counts</h2><p>{appetite.requirement_count} requirements · {appetite.preference_count} target preferences</p></div></section><section><span>4</span><div><h2>Source</h2><p>{appetite.source}</p></div></section></div><p className="uw-support-note">Only metadata returned by the appetite status endpoint is shown here.</p></main>;
+function Guidelines({ guideline }: { guideline: GuidelineSummary }) {
+  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>{guideline.name}</h1><p>The decision criteria currently applied to the full submission queue.</p></div></div><div className="uw-guideline-list"><section><span>1</span><div><h2>Version</h2><p>{guideline.version}</p></div></section><section><span>2</span><div><h2>Effective date</h2><p>{dateText(guideline.effective_from)}</p></div></section><section><span>3</span><div><h2>Rule counts</h2><p>{guideline.requirement_count} requirements · {guideline.preference_count} target preferences</p></div></section><section><span>4</span><div><h2>Source</h2><p>{guideline.source}</p></div></section></div><p className="uw-support-note">The agent decides which submission evidence to retrieve. These criteria remain fixed for the run.</p></main>;
 }
 
 function StatePage({ error, retry }: { error?: string; retry?: () => void }) {
@@ -321,14 +321,18 @@ export default function UnderwritingQueue() {
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [rerunning, setRerunning] = useState(false);
+  const [selectedGuidelineId, setSelectedGuidelineId] = useState("");
   const started = useRef(false);
-  const load = useCallback(async (rerun = false) => {
+  const load = useCallback(async (rerun = false, requestedGuidelineId?: string) => {
     if (rerun) setRerunning(true);
     else setLoading(true);
     try {
-      const [health, submissions, appetite] = await Promise.all([fetchHealth(), fetchSubmissions(), fetchAppetiteStatus()]);
-      const run = await analyzeSubmissions(submissions.map((item) => item.submission_id));
-      setData({ health, submissions, appetite, run });
+      const [health, submissions, guidelines] = await Promise.all([fetchHealth(), fetchSubmissions(), fetchGuidelines()]);
+      const guideline = guidelines.find((item) => item.id === requestedGuidelineId) ?? guidelines[0];
+      if (!guideline) throw new Error("No underwriting guideline is installed.");
+      const run = await analyzeSubmissions(guideline, submissions.map((item) => item.submission_id));
+      setSelectedGuidelineId(guideline.id);
+      setData({ health, submissions, guidelines, guideline, run });
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The underwriting queue could not be loaded.");
@@ -347,5 +351,5 @@ export default function UnderwritingQueue() {
   if (loading && !data) return <StatePage />;
   if (error && !data) return <StatePage error={error} retry={() => void load()} />;
   if (!data) return null;
-  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>No assessed submissions</h1><p>The batch run completed without an assessed account.</p></div> : view === "queue" ? <Queue data={data} onRerun={() => void load(true)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines appetite={data.appetite} />}</div></div></div>;
+  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>No assessed submissions</h1><p>The batch run completed without an assessed account.</p></div> : view === "queue" ? <Queue data={data} onRerun={() => void load(true, selectedGuidelineId)} onGuidelineChange={(id) => void load(true, id)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines guideline={data.guideline} />}</div></div></div>;
 }

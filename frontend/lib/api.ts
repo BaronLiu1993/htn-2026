@@ -1,7 +1,8 @@
 import type {
   AnalysisRun,
-  AppetiteStatus,
+  GuidelineSummary,
   HealthResponse,
+  InvestigationProfile,
   QueueSubmission,
 } from "./types";
 
@@ -43,15 +44,24 @@ export function fetchSubmissions() {
   return request<QueueSubmission[]>("/api/submissions");
 }
 
-export function fetchAppetiteStatus() {
-  return request<AppetiteStatus>("/api/appetite/status");
+export function fetchGuidelines() {
+  return request<GuidelineSummary[]>("/api/guidelines");
 }
 
-export function analyzeSubmissions(submissionIds?: string[]) {
+export function fetchProfiles() {
+  return request<InvestigationProfile[]>("/api/profiles");
+}
+
+export function analyzeSubmissions(
+  guideline: Pick<GuidelineSummary, "id" | "version">,
+  submissionIds?: string[],
+) {
   return request<AnalysisRun>("/api/analysis/batch", {
     method: "POST",
     body: JSON.stringify({
       submission_ids: submissionIds?.length ? submissionIds : null,
+      guideline_id: guideline.id,
+      guideline_version: guideline.version,
     }),
   });
 }

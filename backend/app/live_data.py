@@ -1,13 +1,11 @@
 from __future__ import annotations
 
 import re
-import time
 from collections import defaultdict, deque
 from datetime import date, datetime
 from typing import Any, Callable
-from uuid import uuid4
 
-from .federato_client import FederatoClient, FederatoError
+from .federato_client import FederatoError
 from .models import BuildingEvidence, ClaimEvidence, SubmissionEvidence, TraceEvent
 from .schema_registry import SchemaRegistry
 
@@ -113,51 +111,24 @@ def _identifier(record: dict[str, Any]) -> str | None:
 
 
 class LiveFederatoLoader:
-    """Loads rule-relevant fields, then resolves schema-declared references."""
+    """Loads only package-declared resources and follows discovered references."""
 
-    SEMANTIC_RESOURCES = (
-        "Submission",
-        "Policy",
-        "Insured",
-        "Claim",
-        "ExposureUnit",
-        "Location",
-        "Building",
-    )
     FIELD_ALIASES = {
-        "Submission": (
-            "submission_number", "number", "reference_number", "received_date",
-            "submission_date", "created_at", "submission_type", "business_type", "type",
-        ),
-        "Policy": (
-            "effective_date", "expiration_date", "policy_start", "policy_end",
-            "line_of_business", "lob", "product_type", "tiv", "total_insured_value",
-            "total_tiv", "premium", "total_premium", "written_premium", "business_type",
-            "submission_type",
-        ),
-        "Insured": ("name", "account_name", "insured_name", "legal_name"),
-        "Claim": ("loss_date", "date_of_loss", "occurred_at", "loss_value", "incurred_loss", "total_incurred", "amount"),
-        "Location": ("state", "state_code", "primary_state", "risk_state"),
-        "Building": (
-            "year_built", "construction_year", "built_year", "construction_type",
-            "construction", "construction_class", "tiv", "total_insured_value", "value",
-            "occupancy", "occupancy_type", "building_use", "use_type", "sprinklered",
-            "has_sprinklers", "sprinkler_status", "protection_class",
-            "public_protection_class", "ppc", "flood_zone", "fema_flood_zone",
-            "flood_risk_zone", "wildfire_score", "wildfire_risk_score", "wildfire_risk",
-        ),
-        "ExposureUnit": (),
+        "Submission": ("submission_number", "number", "reference_number", "received_date", "submission_date", "created_at", "insured_name"),
     }
 
     def __init__(
         self,
-        client: FederatoClient,
+        client: Any,
         registry: SchemaRegistry,
         trace_sink: TraceSink,
+        semantic_resources: list[str] | None = None,
     ) -> None:
         self.client = client
         self.registry = registry
         self.trace_sink = trace_sink
+        self.semantic_resources = semantic_resources or ["Submission"]
+        self.records: dict[str, list[dict[str, Any]]] = {}
 
     def _select_fields(self, resource: str, semantic: str) -> list[str]:
         fields = self.registry.fields_for(resource)
@@ -188,56 +159,32 @@ class LiveFederatoLoader:
             if selected_fields:
                 query["select"] = selected_fields
             self.registry.validate_query(query)
-            started = time.perf_counter()
             try:
-                payload = await self.client.query(query)
+                payload = await self.client.query(
+                    query,
+                    purpose=f"Retrieve {resource} evidence",
+                )
                 page, total = _rows(payload)
                 all_rows.extend(page)
-                self.trace_sink(
-                    TraceEvent(
-                        id=f"trace_{uuid4().hex[:10]}",
-                        tool="query_federato",
-                        purpose=f"Retrieve {resource} evidence",
-                        status="success",
-                        started_at=datetime.now(),
-                        duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                        fields=selected_fields,
-                        result_summary=(
-                            f"Retrieved {len(page)} {resource} records with "
-                            f"{len(selected_fields)} rule-relevant fields"
-                        ),
-                    )
-                )
             except Exception as exc:
-                self.trace_sink(
-                    TraceEvent(
-                        id=f"trace_{uuid4().hex[:10]}",
-                        tool="query_federato",
-                        purpose=f"Retrieve {resource} evidence",
-                        status="failure",
-                        started_at=datetime.now(),
-                        duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                        result_summary=f"Failed to retrieve {resource}",
-                        error=str(exc),
-                    )
-                )
                 raise
             if len(page) < limit or (total is not None and len(all_rows) >= total):
                 break
             offset += limit
-            if offset >= 1_000:
-                break
         return all_rows
 
     async def load(self) -> list[SubmissionEvidence]:
-        resource_aliases: dict[str, str] = {}
-        records: dict[str, list[dict[str, Any]]] = {}
-        for semantic in self.SEMANTIC_RESOURCES:
-            actual = self.registry.find_resource(semantic)
-            if actual and actual not in records:
-                resource_aliases[semantic] = actual
-                records[actual] = await self._query_all(actual, semantic)
+        resource = self.registry.find_resource("Submission")
+        if not resource:
+            raise FederatoError("The discovered schema has no Submission resource.")
+        self.records = {resource: await self._query_all(resource, "Submission")}
+        return self.normalize(self.records)
 
+    def normalize(self, records: dict[str, list[dict[str, Any]]]) -> list[SubmissionEvidence]:
+        resource_aliases = {
+            semantic: actual for semantic in self.semantic_resources
+            if (actual := self.registry.find_resource(semantic))
+        }
         submission_resource = resource_aliases.get("Submission")
         if not submission_resource:
             raise FederatoError("The discovered schema has no Submission resource.")
@@ -255,7 +202,7 @@ class LiveFederatoLoader:
                 target = (target_resource, target_id)
                 if target in index:
                     adjacency[node].add(target)
-                    adjacency[target].add(node)
+
 
         def related(start: tuple[str, str]) -> dict[str, list[dict[str, Any]]]:
             found: dict[str, list[dict[str, Any]]] = defaultdict(list)
@@ -387,6 +334,7 @@ class LiveFederatoLoader:
                     ),
                     buildings=building_models,
                     claims=claim_models,
+                    raw_records=dict(graph),
                     source_records={
                         resource: [identifier for record in items if (identifier := _identifier(record))]
                         for resource, items in graph.items()

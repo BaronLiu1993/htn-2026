@@ -1,0 +1,33 @@
+{
+  "purpose": "Check business type, property values, building construction and five-year losses because these determine whether each submission meets the selected guideline.",
+  "query": {
+    "resource": "Submission",
+    "expand": {
+      "insured": true,
+      "policy": {
+        "buildings": true
+      }
+    },
+    "pagination": {
+      "limit": 100,
+      "offset": 0
+    }
+  },
+  "fact_ids": [
+    "submission_type",
+    "line_of_business",
+    "primary_state",
+    "tiv",
+    "premium",
+    "oldest_building_year",
+    "acceptable_construction_share",
+    "five_year_loss_total"
+  ],
+  "loss_query": {
+    "resource": "Claim",
+    "pagination": {
+      "limit": 100,
+      "offset": 0
+    }
+  }
+}
