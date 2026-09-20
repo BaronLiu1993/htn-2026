@@ -218,3 +218,18 @@ DEMO_SUBMISSIONS: list[SubmissionEvidence] = [
         claims=[_claim("C-112-A", date(2025, 1, 3), 31_000)],
     ),
 ]
+
+# Fictional auto submissions for the explicitly labelled sample appetite.
+DEMO_SUBMISSIONS.extend([
+    SubmissionEvidence(
+        id="201", submission_number="SUB-DEMO-AUTO-201", insured_name="Maple Delivery Fleet",
+        received_date=date(2026, 9, 18), submission_type="new_business",
+        line_of_business="auto", primary_state="OH", premium=80000, claims=[],
+    ),
+    SubmissionEvidence(
+        id="202", submission_number="SUB-DEMO-AUTO-202", insured_name="Cedar Service Vehicles",
+        received_date=date(2026, 9, 17), submission_type="renewal",
+        line_of_business="auto", primary_state="PA", premium=110000,
+        claims=[_claim("C-AUTO-202", date(2025, 4, 10), 65000)],
+    ),
+])

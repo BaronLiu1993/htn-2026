@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import sys
@@ -45,8 +46,9 @@ def _value(record: dict[str, Any], path: str) -> Any:
 
 async def _independent_scope(
     service: UnderwriteService,
+    guideline_id: str = "guideline-a",
 ) -> dict[str, Any]:
-    package = service.guidelines.resolve("guideline-a", "2025.1")
+    package = service.guidelines.resolve(guideline_id)
     raw_schema = await service.client.schema()
     registry = SchemaRegistry(raw_schema)
     resource = registry.find_resource(package.scope.source.resource)
@@ -121,18 +123,19 @@ async def _independent_scope(
     }
 
 
-async def main() -> int:
+async def main(guideline_id: str = "guideline-a") -> int:
     settings = Settings.from_env()
     if not settings.federato_configured or not settings.openai_configured:
         print("Live acceptance requires configured Federato and OpenAI credentials.")
         return 2
 
     service = UnderwriteService(settings)
-    expected = await _independent_scope(service)
+    package = service.guidelines.resolve(guideline_id)
+    expected = await _independent_scope(service, guideline_id)
     run = await service.analyze(
         BatchAnalysisRequest(
-            guideline_id="guideline-a",
-            guideline_version="2025.1",
+            guideline_id=package.id,
+            guideline_version=package.version,
             force_schema_refresh=True,
         )
     )
@@ -222,11 +225,14 @@ async def main() -> int:
         and not missed_assessments
         and not unrelated_assessments
         and not failed_events
-        and all(item.guideline_version == "2025.1" for item in run.assessments)
+        and all(item.guideline_version == package.version for item in run.assessments)
         and all(item.ledger is not None for item in run.assessments)
     )
     return 0 if accepted else 1
 
 
 if __name__ == "__main__":
-    raise SystemExit(asyncio.run(main()))
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--guideline", default="guideline-a")
+    args = parser.parse_args()
+    raise SystemExit(asyncio.run(main(args.guideline)))

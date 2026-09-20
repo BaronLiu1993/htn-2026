@@ -41,7 +41,7 @@ class ScopePredicate(BaseModel):
 
 
 FactOperation = Literal[
-    "scalar", "minimum", "sum", "weighted_match_share", "rolling_sum",
+    "scalar", "minimum", "maximum", "sum", "weighted_match_share", "rolling_sum",
     "rolling_component_sum",
 ]
 
@@ -58,13 +58,14 @@ class FactSource(BaseModel):
     match_values: list[str] = Field(default_factory=list)
     window_years: int | None = None
     require_all: bool = False
+    record_filter: dict[str, str] = Field(default_factory=dict)
     relationship_path: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "FactSource":
         if self.operation == "scalar" and not (self.path or self.field):
             raise ValueError("Scalar facts require a source path.")
-        if self.operation in {"minimum", "sum", "weighted_match_share"} and not (
+        if self.operation in {"minimum", "maximum", "sum", "weighted_match_share"} and not (
             self.collection and self.field
         ):
             raise ValueError("Aggregate facts require a collection and field.")
@@ -95,6 +96,7 @@ class FactBinding(BaseModel):
     match_values: list[str] = Field(default_factory=list)
     window_years: int | None = None
     require_all: bool = False
+    record_filter: dict[str, str] = Field(default_factory=dict)
     relationship_path: list[str] = Field(default_factory=list)
     reason: str | None = None
 
@@ -113,6 +115,7 @@ class FactBinding(BaseModel):
             match_values=self.match_values,
             window_years=self.window_years,
             require_all=self.require_all,
+            record_filter=self.record_filter,
             relationship_path=self.relationship_path,
         )
 
@@ -133,7 +136,7 @@ class SufficiencyPolicy(BaseModel):
 
 class RankingTieBreaker(BaseModel):
     field: Literal[
-        "target_matches", "evidence_completeness", "received_date", "submission_id"
+        "target_matches", "evidence_completeness", "disaster_declaration_count", "received_date", "submission_id"
     ]
     direction: Literal["asc", "desc"]
 

@@ -11,7 +11,7 @@ UnderwriteIQ meets the challenge's **Strong Solution** criteria and implements t
 - explicit missing-data and contradiction handling;
 - an auditable tool trace and polished underwriting queue.
 
-The live acceptance step is complete. UnderwriteIQ authenticated to Federato, discovered 12 runtime resources, loaded 158 submissions, executed model-authored evidence queries, and produced 158 grounded OpenAI explanations without a trace failure. Without credentials, the app still falls back to its representative demo schema and data. External enrichment is intentionally deferred because the challenge describes it as optional.
+Live acceptance now verifies guideline scope before assessment. The property guideline selects 38 of 158 available submissions; 120 are outside scope. Exact candidate IDs, evidence attribution, explanations, and query traces are checked. See README for the current live snapshot. Demo data remains available without Federato credentials.
 
 ## What the agent is
 
@@ -72,7 +72,7 @@ Carrier appetite is not embedded in the prompt. It lives in a versioned JSON rul
 
 ### External data
 
-No external flood, climate, geocoding, or business-health service currently affects ranking. The UI shows COPE fields that exist in Federato evidence, but it does not claim optional enrichment occurred.
+Optional OpenFEMA state disaster context breaks ranking ties after target fit and evidence completeness. The panel shows the source, count, and actual rank movement. Failure leaves the queue unchanged. This is not a property flood score or a carrier requirement.
 
 ## What happens during one run
 
@@ -160,7 +160,7 @@ Intentionally deterministic:
 | Trace reasoning | Query purposes, selected fields, duration, result summary, failures, and adaptations | Implemented |
 | Polished UI | Filterable ranked queue, details, evidence table, COPE view, activity trace | Implemented |
 | Handle 50+ | Pagination to 1,000 records, a 60-record test, and a 158-record live run | Live verified |
-| External enrichment | Optional per challenge | Deferred |
+| External enrichment | Optional state-level FEMA tie-breaker with visible rank movement | Fail-open |
 
 ## Safety and failure behavior
 
@@ -177,17 +177,16 @@ Intentionally deterministic:
 
 - The automated suite covers rule precedence, boundary cases, schema validation, dynamic tool use, query repair, fallback, grounding, ranking, API behavior, and a 60-record queue.
 - Federato OAuth, schema discovery, and querying were verified against 12 runtime resources and 158 submissions.
-- A live OpenAI full-queue run produced 158 of 158 grounded explanations.
-- The agent issued two schema-grounded Federato queries; both succeeded with no repair or trace failure.
-- The deterministic result was 155 out-of-appetite submissions and 3 needing review because the five-year loss test was unresolved.
+- Scoped live acceptance and explanation coverage are recorded in README and local run artifacts.
+- The offline replay demonstrates four appetite-status changes after missing Claim evidence is retrieved.
 
 ## Honest limitations
 
 - Live field normalization uses schema-aware traversal plus conservative semantic aliases; it has been verified against the organizer schema, but new schema versions should be regression-tested.
-- A full 158-explanation OpenAI run can take several minutes; deterministic ranking remains available immediately if OpenAI falls back.
+- Analysis is synchronous. A separate 30-second writing pass can add latency; writing failure retains rule-based explanations. Evidence-agent or required-source failure remains visible.
 - Runs and traces are held in memory and reset on backend restart.
 - The synchronous workflow is appropriate for the hackathon dataset, not yet a production job queue.
-- External enrichment and portfolio-accumulation analysis are sensible future work, not current capabilities.
+- FEMA context is state-level only. Portfolio accumulation and property-level flood analysis are not implemented.
 
 ## Judge-ready explanation
 

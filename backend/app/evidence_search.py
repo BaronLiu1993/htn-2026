@@ -8,6 +8,8 @@ from typing import Any
 from .evidence_ledger import FactMapper
 from .live_data import LiveFederatoLoader, _identifier, _rows
 from .models import EvidenceLedger, SubmissionEvidence
+from .federato_client import FederatoError, repairable_query_error
+from .schema_registry import QueryValidationError
 
 
 class EvidenceSearch:
@@ -44,6 +46,7 @@ class EvidenceSearch:
             ]
         self.ledgers = [mapper.build(item) for item in self.submissions]
         self.useful_changes = 0
+        self.policy_search_completed: set[str] = set()
 
     def rebind(self, bindings: list[Any] | None = None) -> dict[str, Any]:
         bound, unbound = self.mapper.apply_bindings(
@@ -63,18 +66,33 @@ class EvidenceSearch:
         }
 
     def prepare_query(self, query: dict[str, Any]) -> dict[str, Any]:
-        """Complete expanded projections with schema-valid evidence fields."""
+        """Expand every selected reference and complete schema-valid projections."""
         prepared = deepcopy(query)
         resource = prepared.get("resource")
-        expand = prepared.get("expand")
-        if not isinstance(resource, str) or not isinstance(expand, dict):
+        if not isinstance(resource, str):
             return prepared
-        prepared["select"] = _expanded_projection(
-            self.loader.registry,
-            self.mapper,
+        registry = self.loader.registry
+        select = _normalize_select(prepared.get("select"))
+        expand = prepared.get("expand") if isinstance(prepared.get("expand"), dict) else {}
+        expand = _expand_selected_references(registry, resource, select, expand)
+        if expand:
+            prepared["expand"] = expand
+            prepared["select"] = _expanded_projection(
+                registry,
+                self.mapper,
+                resource,
+                expand,
+                select,
+            )
+        elif select:
+            prepared["select"] = select
+        if "select" not in prepared:
+            return prepared
+        prepared["select"] = _omit_unexpanded_references(
+            registry,
             resource,
-            expand,
             prepared.get("select"),
+            prepared.get("expand") if isinstance(prepared.get("expand"), dict) else {},
         )
         return prepared
 
@@ -104,7 +122,7 @@ class EvidenceSearch:
                 reason = fact.state
                 if fact.state == "missing" and fact.note and "binding" in fact.note.lower():
                     reason = "unbound"
-                elif fact.state == "missing" and fact.note and "linked property policy" in fact.note.lower():
+                elif fact.state == "missing" and fact.note and "linked policy" in fact.note.lower():
                     reason = "missing_policy"
                 elif fact.state == "missing" and fact.note and "incomplete" in fact.note.lower():
                     reason = "incomplete_collection"
@@ -155,14 +173,17 @@ class EvidenceSearch:
         }
 
     async def fill_headquarters(self, gateway: Any) -> dict[str, Any] | None:
+        needs_buildings = any(
+            fact.source.resource.casefold() == "building" or fact.id == "tiv"
+            for fact in self.mapper.package.required_facts
+        )
         missing = [
             item
             for item in self.submissions
             if (
                 item.insured_name == "Unnamed account"
                 or item.primary_state is None
-                or item.tiv is None
-                or not item.buildings
+                or (needs_buildings and (item.tiv is None or not item.buildings))
             )
         ]
         if not missing or getattr(gateway, "budget_remaining", 0) <= 0:
@@ -179,27 +200,174 @@ class EvidenceSearch:
                 submission_resource,
                 [item.id for item in missing],
             ),
+            include_buildings=needs_buildings,
         )
         if query is None:
             return None
-        payload = await gateway.query(
-            query,
-            purpose="Need the insured name, risk state, and building values.",
-            fact_ids=["primary_state", "tiv", "oldest_building_year", "acceptable_construction_share"],
+        try:
+            return await self._fetch_and_apply(
+                gateway,
+                query,
+                purpose="Need the insured name and risk state" + (", plus building values." if needs_buildings else "."),
+                fact_ids=[
+                    "primary_state",
+                    "tiv",
+                    "oldest_building_year",
+                    "acceptable_construction_share",
+                ] if needs_buildings else ["primary_state"],
+                note=_headquarters_note,
+            )
+        except (FederatoError, QueryValidationError) as exc:
+            if not repairable_query_error(exc):
+                raise
+            return None
+
+
+    async def fill_policies(self, gateway: Any) -> dict[str, Any] | None:
+        """Load premium, business type, and claims even when the agent skips Policy."""
+
+        missing = [
+            item
+            for item in self.submissions
+            if (not _has_linked_policy(item) or item.premium is None)
+            and item.id not in self.policy_search_completed
+        ]
+        if not missing or getattr(gateway, "budget_remaining", 0) <= 0:
+            return None
+        native_ids = _unique_native_ids(
+            self.loader.registry,
+            self.loader.registry.find_resource("Submission") or "Submission",
+            [item.id for item in missing],
+        ) or self.candidate_query_ids
+        feedback = await self._fetch_policy_evidence(
+            gateway,
+            native_ids,
+            expand_claims=True,
         )
+        still_missing = [
+            item.id
+            for item in self.submissions
+            if not _has_linked_policy(item) or item.premium is None
+        ]
+        if still_missing and getattr(gateway, "budget_remaining", 0) > 0:
+            fallback_ids = _unique_native_ids(
+                self.loader.registry,
+                self.loader.registry.find_resource("Submission") or "Submission",
+                still_missing,
+            )
+            nested = await self._fetch_policy_evidence(
+                gateway,
+                fallback_ids,
+                expand_claims=False,
+                from_submission=True,
+            )
+            if nested:
+                feedback = nested
+        if feedback is not None:
+            self.policy_search_completed.update(item.id for item in missing)
+            for ledger in self.ledgers:
+                if ledger.submission_id in {str(item) for item in still_missing}:
+                    for fact in ledger.facts:
+                        if fact.state == "missing" and "linked Policy" in (fact.note or ""):
+                            fact.note = "The completed Federato search returned no linked Policy. Request the Policy record."
+        return feedback
+
+    async def _fetch_policy_evidence(
+        self,
+        gateway: Any,
+        native_ids: list[Any],
+        *,
+        expand_claims: bool,
+        from_submission: bool = False,
+    ) -> dict[str, Any] | None:
+        query = (
+            _submission_policy_query(self.loader.registry, native_ids)
+            if from_submission
+            else _policy_query(self.loader.registry, native_ids, expand_claims=expand_claims)
+        )
+        if query is None:
+            return None
+        purpose = (
+            "Need the Policy linked from each in-scope Submission."
+            if from_submission
+            else (
+                "Need premium, business type, and claims for the in-scope submissions."
+                if expand_claims
+                else "Need premium and business type for the in-scope submissions."
+            )
+        )
+        fact_ids = (
+            ["premium", "submission_type"]
+            if from_submission or not expand_claims
+            else ["premium", "submission_type", "five_year_loss_total"]
+        )
+        try:
+            return await self._fetch_and_apply(
+                gateway,
+                query,
+                purpose=purpose,
+                fact_ids=fact_ids,
+                note=_policy_note,
+            )
+        except (FederatoError, QueryValidationError) as exc:
+            if not repairable_query_error(exc):
+                raise
+            if from_submission or not expand_claims:
+                return None
+            return await self._fetch_policy_evidence(
+                gateway,
+                native_ids,
+                expand_claims=False,
+            )
+
+    async def _fetch_and_apply(
+        self,
+        gateway: Any,
+        query: dict[str, Any],
+        *,
+        purpose: str,
+        fact_ids: list[str],
+        note: Any,
+    ) -> dict[str, Any]:
+        query = self.prepare_query(query)
+        payload = await gateway.query(query, purpose=purpose, fact_ids=fact_ids)
         result = {
             "ok": True,
             "query": query,
-            "fact_ids": ["primary_state", "tiv", "oldest_building_year", "acceptable_construction_share"],
+            "fact_ids": fact_ids,
             "result": payload,
         }
         feedback = self.apply(result)
         if gateway.trace:
-            gateway.trace[-1].result_summary = _headquarters_note(feedback)
+            gateway.trace[-1].result_summary = note(feedback)
             gateway.trace[-1].records_inspected = int(feedback.get("records_found") or 0)
             gateway.trace[-1].facts_changed = int(feedback.get("useful_fact_changes") or 0)
             gateway.trace[-1].source_resource = str(query.get("resource") or "")
-            gateway.trace[-1].fact_ids = result["fact_ids"]
+            gateway.trace[-1].fact_ids = fact_ids
+        gateway.annotate_query(gateway.last_query_audit_id, feedback)
+        rows, total = _rows(payload)
+        pagination = query.get("pagination") if isinstance(query.get("pagination"), dict) else {}
+        limit = int(pagination.get("limit") or 100)
+        offset = int(pagination.get("offset") or 0)
+        more = len(rows) >= limit and (total is None or offset + len(rows) < total)
+        if more and getattr(gateway, "budget_remaining", 0) <= 0:
+            raise RuntimeError("Policy/evidence search stopped before all pages were retrieved.")
+        if more:
+            next_query = deepcopy(query)
+            next_query["pagination"] = {"limit": limit, "offset": offset + limit}
+            nested = await self._fetch_and_apply(
+                gateway,
+                next_query,
+                purpose=purpose,
+                fact_ids=fact_ids,
+                note=note,
+            )
+            feedback["records_found"] = int(feedback.get("records_found") or 0) + int(
+                nested.get("records_found") or 0
+            )
+            feedback["useful_fact_changes"] = int(feedback.get("useful_fact_changes") or 0) + int(
+                nested.get("useful_fact_changes") or 0
+            )
         return feedback
 
     def apply(self, result: dict[str, Any]) -> dict[str, Any]:
@@ -377,6 +545,11 @@ class EvidenceSearch:
         }
         self.ledgers[:] = fresh
         self.useful_changes += changed
+        for ledger in self.ledgers:
+            if ledger.submission_id in self.policy_search_completed:
+                for fact in ledger.facts:
+                    if fact.state == "missing" and "linked Policy" in (fact.note or ""):
+                        fact.note = "The completed Federato search returned no linked Policy. Request the Policy record."
         if not rows:
             query_effect = "zero_rows"
         elif unowned_rows == len(rows):
@@ -414,22 +587,88 @@ def _normalized_key(value: str) -> str:
     return "".join(character for character in value.lower() if character.isalnum())
 
 
-def _select_object(select: Any) -> dict[str, Any]:
+def _normalize_select(select: Any) -> dict[str, Any]:
+    """Turn list/dotted selects into nested objects Federato can expand."""
     if isinstance(select, list):
-        return {
-            item: True
-            for item in select
-            if isinstance(item, str)
-        }
+        output: dict[str, Any] = {}
+        for item in select:
+            if isinstance(item, str):
+                _assign_select_path(output, item, True)
+            elif isinstance(item, dict):
+                for key, value in _normalize_select(item).items():
+                    _merge_select(output, key, value)
+        return output
     if not isinstance(select, dict):
         return {}
     expanded = select.get("$expand")
     if expanded is True:
         return {}
     if isinstance(expanded, dict):
-        nested = expanded.get("select")
-        return dict(nested) if isinstance(nested, dict) else dict(expanded)
-    return dict(select)
+        return _normalize_select(expanded.get("select", expanded))
+    output: dict[str, Any] = {}
+    for key, value in select.items():
+        if not isinstance(key, str) or key.startswith("$"):
+            continue
+        nested = _normalize_select(value) if isinstance(value, (dict, list)) else value
+        _assign_select_path(output, key, nested)
+    return output
+
+
+def _assign_select_path(output: dict[str, Any], path: str, value: Any) -> None:
+    cursor = output
+    segments = path.split(".")
+    for segment in segments[:-1]:
+        child = cursor.get(segment)
+        if not isinstance(child, dict):
+            child = {}
+            cursor[segment] = child
+        cursor = child
+    _merge_select(cursor, segments[-1], value)
+
+
+def _merge_select(output: dict[str, Any], key: str, value: Any) -> None:
+    existing = output.get(key)
+    if isinstance(existing, dict) and isinstance(value, dict):
+        for nested_key, nested_value in value.items():
+            _merge_select(existing, nested_key, nested_value)
+        return
+    if isinstance(existing, dict) and value is True:
+        return
+    output[key] = value
+
+
+def _expand_selected_references(
+    registry: Any,
+    resource: str,
+    select: dict[str, Any],
+    expand: dict[str, Any],
+) -> dict[str, Any]:
+    """Add expand for every reference the select tries to traverse."""
+    expanded = dict(expand)
+    references = {item.field: item for item in registry.references_for(resource)}
+    for field, value in select.items():
+        reference = references.get(field)
+        if reference is None:
+            continue
+        if value is True and field not in expanded:
+            continue
+        child_expand = expanded.get(field)
+        if child_expand is None:
+            child_expand = True
+        nested_select = value if isinstance(value, dict) else {}
+        nested_expand = (
+            {}
+            if child_expand is True or child_expand == {}
+            else child_expand if isinstance(child_expand, dict) else {}
+        )
+        nested_expand = _expand_selected_references(
+            registry,
+            reference.target,
+            nested_select,
+            nested_expand,
+        )
+        expanded[field] = nested_expand if nested_expand else True
+    return expanded
 
 
 def _expanded_projection(
@@ -439,20 +678,24 @@ def _expanded_projection(
     expand: dict[str, Any],
     select: Any,
 ) -> dict[str, Any]:
-    projection = _select_object(select)
+    projection = {
+        key: value
+        for key, value in _normalize_select(select).items()
+        if key in registry.fields_for(resource)
+    }
     fields = registry.fields_for(resource)
     identifier = registry.identifier_field(resource)
     projection[identifier] = True
 
-    bound_fields = mapper.bound_fields(resource)
-    for field in fields:
-        if _normalized_key(field) in bound_fields:
-            projection[field] = True
+    for path in mapper.bound_paths(resource):
+        if registry.field_exists(resource, path):
+            _assign_select_path(projection, path, True)
 
     references = {
         reference.field: reference
         for reference in registry.references_for(resource)
     }
+
     for field in references:
         projection.setdefault(field, True)
 
@@ -470,6 +713,44 @@ def _expanded_projection(
             nested_select,
         )
     return projection
+
+
+def _omit_unexpanded_references(registry: Any, resource: str, select: Any, expand: dict[str, Any]) -> dict[str, Any]:
+    projection = _normalize_select(select)
+    for reference in registry.references_for(resource):
+        if reference.field not in projection:
+            continue
+        if reference.field not in expand:
+            # Raw reference IDs are valid. Only nested projections need expansion.
+            if projection[reference.field] is not True:
+                del projection[reference.field]
+            continue
+        nested = expand[reference.field]
+        child = _omit_unexpanded_references(
+            registry, reference.target, projection[reference.field],
+            nested if isinstance(nested, dict) else {},
+        )
+        child[registry.identifier_field(reference.target)] = True
+        projection[reference.field] = child
+    return projection
+
+
+def _submission_policy_query(registry: Any, native_ids: list[Any]) -> dict[str, Any] | None:
+    submission = registry.find_resource("Submission")
+    policy = registry.find_resource("Policy")
+    field = _reference_field(registry, submission, policy, "policy", "policies")
+    if not submission or not policy or not field or not native_ids:
+        return None
+    return {
+        "resource": submission,
+        "where": {registry.identifier_field(submission): {"$in": native_ids}},
+        "expand": {field: True},
+        "select": {
+            registry.identifier_field(submission): True,
+            field: _retained_fields(registry, policy, ("premium", "business_type")),
+        },
+        "pagination": {"limit": 100, "offset": 0},
+    }
 
 
 def _supported_fields(mapper: FactMapper, resource: str) -> set[str]:
@@ -637,8 +918,6 @@ def _retained_fields(registry: Any, resource: str, extras: tuple[str, ...] = ())
     for candidate in ("id", "_id"):
         if candidate in fields:
             wanted.add(candidate)
-    for reference in registry.references_for(resource):
-        wanted.add(reference.field)
     for alias in extras:
         name = by_key.get(_normalized_key(alias))
         if name:
@@ -646,7 +925,7 @@ def _retained_fields(registry: Any, resource: str, extras: tuple[str, ...] = ())
     return {name: True for name in sorted(wanted)}
 
 
-def _headquarters_query(registry: Any, native_ids: list[Any]) -> dict[str, Any] | None:
+def _headquarters_query(registry: Any, native_ids: list[Any], *, include_buildings: bool = True) -> dict[str, Any] | None:
     if not native_ids:
         return None
     submission = registry.find_resource("Submission")
@@ -656,51 +935,28 @@ def _headquarters_query(registry: Any, native_ids: list[Any]) -> dict[str, Any] 
     insured_field = _reference_field(registry, submission, insured, "insured")
     hq_field = _reference_field(registry, insured, location, "hq", "headquarters")
     buildings_field = _reference_field(registry, location, building, "buildings")
-    if not submission or not insured or not location or not building:
+    if not submission or not insured or not location or not insured_field or not hq_field:
         return None
-    if not insured_field or not hq_field or not buildings_field:
-        return None
-    identifier = registry.identifier_field(submission)
+    location_select = _retained_fields(registry, location, ("state", "state_code", "primary_state"))
+    location_expand: Any = True
+    if include_buildings:
+        if not building or not buildings_field:
+            return None
+        location_expand = {buildings_field: True}
+        location_select.update(_retained_fields(registry, location, ("occupancy", "protection_class")))
+        location_select[buildings_field] = _retained_fields(
+            registry, building, ("tiv", "total_insured_value", "year_built", "construction_year",
+                                 "construction_type", "construction", "occupancy", "protection_class", "sprinklered"),
+        )
     return {
         "resource": submission,
-        "where": {identifier: {"$in": native_ids}},
-        "expand": {insured_field: {hq_field: {buildings_field: True}}},
+        "where": {registry.identifier_field(submission): {"$in": native_ids}},
+        "expand": {insured_field: {hq_field: location_expand}},
         "select": {
             **_retained_fields(registry, submission),
             insured_field: {
-                **_retained_fields(
-                    registry,
-                    insured,
-                    ("name", "account_name", "insured_name", "legal_name"),
-                ),
-                hq_field: {
-                    **_retained_fields(
-                        registry,
-                        location,
-                        (
-                            "state",
-                            "state_code",
-                            "primary_state",
-                            "occupancy",
-                            "protection_class",
-                        ),
-                    ),
-                    buildings_field: _retained_fields(
-                        registry,
-                        building,
-                        (
-                            "tiv",
-                            "total_insured_value",
-                            "year_built",
-                            "construction_year",
-                            "construction_type",
-                            "construction",
-                            "occupancy",
-                            "protection_class",
-                            "sprinklered",
-                        ),
-                    ),
-                },
+                **_retained_fields(registry, insured, ("name", "account_name", "insured_name", "legal_name")),
+                hq_field: location_select,
             },
         },
         "pagination": {"limit": 100, "offset": 0},
@@ -712,6 +968,55 @@ def _is_headquarters_query(query: dict[str, Any]) -> bool:
     return "hq" in encoded or "headquarters" in encoded
 
 
+def _policy_query(
+    registry: Any,
+    native_ids: list[Any],
+    *,
+    expand_claims: bool = True,
+    offset: int = 0,
+) -> dict[str, Any] | None:
+    if not native_ids:
+        return None
+    policy = registry.find_resource("Policy")
+    submission = registry.find_resource("Submission")
+    claim = registry.find_resource("Claim")
+    submission_field = _reference_field(registry, policy, submission, "submission")
+    claims_field = _reference_field(registry, policy, claim, "claims")
+    if not policy or not submission or not submission_field:
+        return None
+    expand: dict[str, Any] = {submission_field: True}
+    select: dict[str, Any] = {
+        **_retained_fields(
+            registry,
+            policy,
+            ("business_type", "premium", "total_premium", "written_premium", "line_of_business"),
+        ),
+        submission_field: _retained_fields(registry, submission),
+    }
+    if expand_claims and claim and claims_field:
+        expand[claims_field] = True
+        select[claims_field] = _retained_fields(
+            registry,
+            claim,
+            (
+                "loss_date",
+                "date_of_loss",
+                "loss_value",
+                "paid_indemnity",
+                "paid_expense",
+                "reserve_indemnity",
+                "reserve_expense",
+            ),
+        )
+    return {
+        "resource": policy,
+        "where": {submission_field: {"$in": native_ids}},
+        "expand": expand,
+        "select": select,
+        "pagination": {"limit": 100, "offset": offset},
+    }
+
+
 def _headquarters_note(feedback: dict[str, Any]) -> str:
     records = int(feedback.get("records_found") or 0)
     if not records:
@@ -720,8 +1025,20 @@ def _headquarters_note(feedback: dict[str, Any]) -> str:
             "Name, risk state, and building values stay missing."
         )
     confirmed = int(feedback.get("affected_submissions") or 0)
-    opener = "The search returned insured headquarters and buildings."
+    opener = "The search returned insured headquarters evidence."
     if confirmed:
         noun = "submission" if confirmed == 1 else "submissions"
         return f"{opener} {confirmed} {noun} now have a name and a risk state."
     return f"{opener} Name, risk state, and building values are now on file."
+
+
+def _policy_note(feedback: dict[str, Any]) -> str:
+    records = int(feedback.get("records_found") or 0)
+    if not records:
+        return "The search returned no linked policies. Premium and claims stay missing."
+    confirmed = int(feedback.get("affected_submissions") or 0)
+    opener = "The search returned linked policies."
+    if confirmed:
+        noun = "submission" if confirmed == 1 else "submissions"
+        return f"{opener} {confirmed} {noun} now have premium or claims."
+    return f"{opener} Premium and claims are now on file."

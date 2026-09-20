@@ -76,10 +76,16 @@ export interface UnderwritingConsideration {
 }
 
 export interface Assessment {
+  enrichment_rank_change?: number;
+  disaster_declaration_count?: number | null;
+  disaster_context_since?: string | null;
+  disaster_context_retrieved_at?: string | null;
   submission_id: string;
   submission_number: string;
   insured_name: string;
+  insured_id?: string | null;
   received_date?: string | null;
+  effective_date?: string | null;
   status: AssessmentStatus;
   target_matches: number;
   target_preferences_total: number;
@@ -241,6 +247,7 @@ export interface GuidelineFactSource {
   match_values?: string[];
   window_years?: number | null;
   require_all?: boolean;
+  record_filter?: Record<string, string>;
   relationship_path?: string[];
 }
 

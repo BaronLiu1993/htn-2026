@@ -659,7 +659,6 @@ class SchemaRegistry:
                 first_segment = path.split(".")[0]
                 if (
                     self._expanded_child(expand, first_segment) is None
-                    and not allow_reference_projection
                 ):
                     raise QueryValidationError(
                         f'Nested select for "{path}" requires expand or select-leaf $expand.',

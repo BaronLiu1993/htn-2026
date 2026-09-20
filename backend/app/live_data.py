@@ -659,13 +659,19 @@ class LiveFederatoLoader:
                 ]
                 if exposure_resource:
                     graph[exposure_resource] = exposures
-                    expected[exposure_resource] = exposure_ids
+                    if all("exposure_units" in policy and isinstance(policy["exposure_units"], list) for policy in policies):
+                        expected[exposure_resource] = exposure_ids
+                    else:
+                        expected.pop(exposure_resource, None)
                 if policy_resource:
                     graph[policy_resource] = policies
                     expected[policy_resource] = policy_ids
                 if claim_resource:
                     graph[claim_resource] = claims
-                    expected[claim_resource] = claim_ids
+                    if all("claims" in policy and isinstance(policy["claims"], list) for policy in policies):
+                        expected[claim_resource] = claim_ids
+                    else:
+                        expected.pop(claim_resource, None)
             else:
                 if policy_resource:
                     graph.pop(policy_resource, None)
@@ -814,6 +820,7 @@ class LiveFederatoLoader:
                         or f"SUB-{submission_id}"
                     ),
                     insured_name=str(insured_name or "Unnamed account"),
+                    insured_id=_identifier(insured) if insured else None,
                     received_date=_date(
                         _first(item, ("received_date", "submission_date", "created_at"))
                     ),

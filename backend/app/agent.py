@@ -14,7 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from .config import Settings
 from .adapters import DemoFederatoAdapter, FederatoAdapter
 from .evidence_ledger import validate_binding
-from .federato_client import FederatoError
+from .federato_client import FederatoError, repairable_query_error
 from .guideline_registry import FactBinding, GuidelinePackage
 from .models import Assessment, EvidenceLedger, TraceEvent
 from .profile_registry import InvestigationProfile
@@ -121,6 +121,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                                 "enum": [
                                     "scalar",
                                     "minimum",
+                                    "maximum",
                                     "sum",
                                     "weighted_match_share",
                                     "rolling_sum",
@@ -202,10 +203,11 @@ Resolve canonical guideline facts before deterministic evaluation. You receive t
 Work in this order:
 1. Inspect the runtime schema. Do not invent resources or fields. Identifier types are binding: if a field is number, $in and $eq values must be JSON numbers, not quoted strings.
 2. Bind each unresolved canonical fact to discovered resources, relationship paths, fields, and one approved deterministic operation. Bindings cannot change rule operators or thresholds.
-3. Write one Federato query for a named underwriting goal. Translate the goal into the documented pipeline. Do not reuse a canned Policy expand payload.
+3. Write one Federato query for a named underwriting goal. Translate the goal into the documented pipeline.
 
 Query language:
 - Pipeline: where (raw records) → expand → unwind → filter (hydrated rows) → over → select → sort → pagination.
+- If select or filter names a reference, that field must be in expand. `select: ["submission.id"]` without `expand.submission` is invalid. Policy searches for premium or claims must expand both `submission` and `claims`.
 - Prefer expand when later filter or select must traverse a reference. Use select-leaf $expand when the hydrated object is only needed in the reply.
 - Use $elemMatch at array boundaries such as exposure_units, buildings, and claims. Never write a bare path like locations.state across an array.
 - Filter in-scope work with native IDs on the relationship field (for example Policy.submission), not stringified id unless that schema field is a string.
@@ -350,8 +352,10 @@ def _search_note(
         )
     if no_policy and resource_key == "policy":
         return (
-            f"The search returned {records} {noun}. "
-            f"{no_policy} submissions have no Policy."
+            f"The Policy search updated {int(feedback.get('affected_submissions') or 0)} submissions"
+            + (f" with {resolved_text}. " if resolved_text else ". ")
+            +
+            f"{no_policy} submissions still have no linked Policy in the retrieved evidence."
         )
     missing = ""
     if unresolved:
@@ -582,6 +586,7 @@ class UnderwritingAgent:
             "approved_binding_operations": [
                 "scalar",
                 "minimum",
+                "maximum",
                 "sum",
                 "weighted_match_share",
                 "rolling_sum",
@@ -623,6 +628,7 @@ class UnderwritingAgent:
                 or current_coverage["unresolved_fact_count"] == 0
             )
             if force_report:
+                await search.fill_policies(gateway)
                 await search.fill_headquarters(gateway)
                 input_items.append(
                     {
@@ -709,6 +715,7 @@ class UnderwritingAgent:
                         }
                     )
                     continue
+                await search.fill_policies(gateway)
                 await search.fill_headquarters(gateway)
                 unsearched = _unsearched_evidence_resources(
                     search,
@@ -862,16 +869,7 @@ class UnderwritingAgent:
             }
         except (json.JSONDecodeError, QueryValidationError, FederatoError) as exc:
             message = str(exc)
-            repairable = not isinstance(exc, FederatoError) or any(
-                token in message
-                for token in (
-                    "VALIDATION_ERROR",
-                    "Unknown field",
-                    "Invalid",
-                    "NOT_FOUND",
-                    "Unknown resource",
-                )
-            )
+            repairable = repairable_query_error(exc) or isinstance(exc, json.JSONDecodeError)
             if isinstance(exc, FederatoError) and not repairable:
                 raise
             trace.append(
@@ -879,7 +877,7 @@ class UnderwritingAgent:
                     id=f"trace_{uuid4().hex[:10]}",
                     tool="query_guidance",
                     purpose="Revise a search that did not match the source.",
-                    status="failure",
+                    status="retry",
                     started_at=datetime.now(),
                     duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
                     result_summary="The search did not match the available fields. The next search must use a different path.",

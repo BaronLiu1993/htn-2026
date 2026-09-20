@@ -43,6 +43,7 @@ DEMO_SCHEMA: dict[str, Any] = {
             "primary_state": {"type": "string"},
             "effective_date": {"type": "string"},
             "expiration_date": {"type": "string"},
+            "exposure_units": {"type": "reference", "resource": "ExposureUnit", "cardinality": "many"},
             "buildings": {
                 "type": "reference",
                 "resource": "Building",
@@ -104,6 +105,12 @@ DEMO_SCHEMA: dict[str, Any] = {
             "id": {"type": "string"},
             "kind": {"type": "string"},
             "basis_amount": {"type": "number"},
+            "vehicle": {"type": "object", "fields": {
+                "year": {"type": "number"}, "radius_miles": {"type": "number"},
+            }},
+            "driver": {"type": "object", "fields": {
+                "accidents_3yr": {"type": "number"}, "mvr_points": {"type": "number"},
+            }},
         },
     },
 }
@@ -145,6 +152,7 @@ def demo_records() -> dict[str, list[dict[str, Any]]]:
                 "buildings": building_ids,
                 "claims": claim_ids,
                 "locations": [submission.id],
+                "exposure_units": ["EU-AUTO-201-V", "EU-AUTO-201-D"] if submission.id == "201" else ["EU-AUTO-202-V", "EU-AUTO-202-D"] if submission.id == "202" else [],
             }
         )
         records["Insured"].append(
@@ -161,6 +169,13 @@ def demo_records() -> dict[str, list[dict[str, Any]]]:
             row = claim.model_dump(mode="json")
             row["policy_id"] = submission.id
             records["Claim"].append(row)
+    # Fictional records for the two sample auto accounts, served through the same query API.
+    records["ExposureUnit"].extend([
+        {"id": "EU-AUTO-201-V", "kind": "vehicle", "vehicle": {"year": 2022, "radius_miles": 100}},
+        {"id": "EU-AUTO-201-D", "kind": "driver", "driver": {"accidents_3yr": 0, "mvr_points": 0}},
+        {"id": "EU-AUTO-202-V", "kind": "vehicle", "vehicle": {"year": 2010, "radius_miles": 1000}},
+        {"id": "EU-AUTO-202-D", "kind": "driver", "driver": {"accidents_3yr": 3, "mvr_points": 8}},
+    ])
     return records
 
 

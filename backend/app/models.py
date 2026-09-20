@@ -38,6 +38,7 @@ class SubmissionEvidence(BaseModel):
     id: str
     submission_number: str
     insured_name: str
+    insured_id: str | None = None
     received_date: date | None = None
     effective_date: date | None = None
     expiration_date: date | None = None
@@ -155,10 +156,16 @@ class QueryAudit(BaseModel):
 
 
 class Assessment(BaseModel):
+    enrichment_rank_change: int = 0
+    disaster_declaration_count: int | None = None
+    disaster_context_since: str | None = None
+    disaster_context_retrieved_at: datetime | None = None
     submission_id: str
     submission_number: str
     insured_name: str
+    insured_id: str | None = None
     received_date: date | None = None
+    effective_date: date | None = None
     status: AssessmentStatus
     target_matches: int
     target_preferences_total: int
