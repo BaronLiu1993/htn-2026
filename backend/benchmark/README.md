@@ -41,3 +41,30 @@ missing-data detection, and condition quality separately.
 - `matrix`: all 30 live policy/appetite combinations
 - `regression`: all matrix and synthetic evaluations
 - `boundary`: the ten synthetic evaluations
+
+## Run the checked-in benchmark
+
+From the repository root (the runner loads `backend/.env` automatically):
+
+```bash
+python3 backend/run_benchmark.py \
+  --output /tmp/underwriteiq-benchmark.json
+```
+
+The runner also accepts a Baseten OpenAI-compatible deployment. Set both variables
+to use it; `BASETEN_MODEL` is optional and defaults to `baseten-model`:
+
+```bash
+BASETEN_API_KEY="..." \
+BASETEN_MODEL_URL="https://model-.../v1" \
+BASETEN_MODEL="baseten-model" \
+BENCHMARK_PROVIDER="baseten" \
+python3 backend/run_benchmark.py
+```
+
+The runner calls the configured model for every matrix cell, then scores its
+returned disposition, rule categories, and conditions against the benchmark
+labels. By default it calls `gpt-5.6-sol` using `OPENAI_API_KEY`; set
+`OPENAI_MODEL` only to override that default. It uses a Baseten deployment when
+`BENCHMARK_PROVIDER=baseten` and both Baseten variables are set. The report
+never writes either API key.
