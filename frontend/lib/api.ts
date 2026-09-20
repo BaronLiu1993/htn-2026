@@ -26,7 +26,15 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
       const payload = (await response.json()) as { detail?: unknown };
       if (typeof payload.detail === "string") message = payload.detail;
       if (payload.detail && typeof payload.detail === "object") {
-        message = JSON.stringify(payload.detail);
+        const detail = payload.detail as { errors?: unknown };
+        if (
+          Array.isArray(detail.errors) &&
+          detail.errors.every((error) => typeof error === "string")
+        ) {
+          message = detail.errors.join(" ");
+        } else {
+          message = "The analysis failed. Review the backend run details.";
+        }
       }
     } catch {
       // Preserve the status-based message if the response is not JSON.

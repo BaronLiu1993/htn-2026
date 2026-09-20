@@ -202,6 +202,7 @@ class AnalysisRun(BaseModel):
     total_submissions: int = 0
     applicable_submissions: int = 0
     not_applicable_submissions: int = 0
+    scope_unknown_submissions: int = 0
     duration_ms: int = 0
     tool_call_count: int = 0
     unresolved_fact_count: int = 0
@@ -234,3 +235,4 @@ class HealthResponse(BaseModel):
     federato_configured: bool
     openai_configured: bool
     baseten_configured: bool
+    baseten_error: str | None = None

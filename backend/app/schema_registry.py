@@ -122,6 +122,21 @@ class SchemaRegistry:
     def field_exists(self, resource: str, path: str) -> bool:
         return self.field_definition(resource, path) is not None
 
+    def path_crosses_reference(self, resource: str, path: str) -> bool:
+        fields = self.fields_for(resource)
+        segments = path.split(".")
+        for index, segment in enumerate(segments[:-1]):
+            definition = fields.get(segment)
+            if not isinstance(definition, dict):
+                return False
+            nested = self._descend(definition)
+            if nested.get("type") == "reference":
+                return True
+            fields = nested.get("fields", {}) if isinstance(nested, dict) else {}
+            if not isinstance(fields, dict):
+                return False
+        return False
+
     def references_for(self, resource: str) -> list[ReferenceField]:
         references: list[ReferenceField] = []
         for name, definition in self.fields_for(resource).items():
@@ -152,6 +167,11 @@ class SchemaRegistry:
                 self._validate_filter(resource, value, prefix)
                 continue
             path = f"{prefix}.{key}" if prefix else key
+            if self.path_crosses_reference(resource, path):
+                raise QueryValidationError(
+                    f'Field path "{path}" crosses a reference. Query the target '
+                    "resource directly or use the reference field itself."
+                )
             if not self.field_exists(resource, path):
                 raise QueryValidationError(
                     f'Unknown field "{path}" on resource "{resource}".'
@@ -205,6 +225,11 @@ class SchemaRegistry:
             for item in select:
                 if isinstance(item, str):
                     path = f"{prefix}.{item}" if prefix else item
+                    if self.path_crosses_reference(resource, path):
+                        raise QueryValidationError(
+                            f'Selected field "{path}" crosses a reference. Select '
+                            "the reference field itself or query its target resource directly."
+                        )
                     if not self.field_exists(resource, path):
                         raise QueryValidationError(
                             f'Unknown selected field "{path}" on "{resource}".'
@@ -218,6 +243,11 @@ class SchemaRegistry:
             if key.startswith("$"):
                 continue
             path = f"{prefix}.{key}" if prefix else key
+            if self.path_crosses_reference(resource, path):
+                raise QueryValidationError(
+                    f'Selected field "{path}" crosses a reference. Select the '
+                    "reference field itself or query its target resource directly."
+                )
             if not self.field_exists(resource, path) and not (
                 isinstance(value, dict)
                 and any(str(operator).startswith("$") for operator in value)
@@ -267,7 +297,11 @@ class SchemaRegistry:
             raise QueryValidationError("Unwind must be a list of paths or path objects.")
         for item in unwind:
             path = item.get("path") if isinstance(item, dict) else item
-            if not isinstance(path, str) or not self.field_exists(resource, path):
+            if (
+                not isinstance(path, str)
+                or self.path_crosses_reference(resource, path)
+                or not self.field_exists(resource, path)
+            ):
                 raise QueryValidationError(f'Unknown unwind path "{path}" on "{resource}".')
             if isinstance(item, dict) and item.get("type", "inner") not in {"inner", "left"}:
                 raise QueryValidationError("Unwind type must be inner or left.")
@@ -278,7 +312,9 @@ class SchemaRegistry:
         ):
             raise QueryValidationError("Over must be a list of field paths.")
         for path in over:
-            if not self.field_exists(resource, path):
+            if self.path_crosses_reference(resource, path) or not self.field_exists(
+                resource, path
+            ):
                 raise QueryValidationError(
                     f'Unknown grouping field "{path}" on "{resource}".'
                 )
@@ -291,6 +327,11 @@ class SchemaRegistry:
                     'Every sort entry must contain a string "field".'
                 )
             field = item["field"]
+            if self.path_crosses_reference(resource, field):
+                raise QueryValidationError(
+                    f'Sort field "{field}" crosses a reference. Sort on the target '
+                    "resource or the reference field itself."
+                )
             if not self.field_exists(resource, field):
                 select = query.get("select")
                 if not isinstance(select, dict) or field not in select:
@@ -358,7 +399,7 @@ class SchemaRegistry:
             values = value if isinstance(value, list) else [value]
             for item in values:
                 if isinstance(item, dict):
-                    identifier = item.get("id")
+                    identifier = item.get("id") or item.get("_id")
                 else:
                     identifier = item
                 if identifier is not None:

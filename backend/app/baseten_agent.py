@@ -27,6 +27,34 @@ Use building_age for building-year rules, loss_history for five-year loss rules,
 
 /no_think"""
 
+DECISION_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "underwriting_decision",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "expected_disposition": {
+                    "type": "string",
+                    "enum": [
+                        "accept",
+                        "refer",
+                        "decline",
+                        "insufficient_information",
+                    ],
+                },
+                "expected_rules": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                },
+            },
+            "required": ["expected_disposition", "expected_rules"],
+            "additionalProperties": False,
+        },
+    },
+}
+
 
 class BasetenDecision(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -48,6 +76,7 @@ class BasetenPrediction:
 class BasetenRunResult:
     model: str
     predictions: list[BasetenPrediction]
+    failures: list[str]
     latency_ms: int
     prompt_tokens: int
     completion_tokens: int
@@ -126,6 +155,8 @@ def _expected_disposition(assessment: Assessment) -> str:
 class BasetenUnderwriter:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._availability_checked_at = 0.0
+        self._availability: tuple[bool, str | None] | None = None
 
     @property
     def configured(self) -> bool:
@@ -133,6 +164,78 @@ class BasetenUnderwriter:
             self.settings.baseten_model_id
             and Path(self.settings.baseten_cli_path).is_file()
         )
+
+    @staticmethod
+    def _cli_error(stderr: bytes, stdout: bytes = b"") -> str:
+        stderr_message = stderr.decode(errors="replace").strip()
+        stdout_message = stdout.decode(errors="replace").strip()
+        message = stderr_message or stdout_message
+        if stdout_message:
+            try:
+                payload = json.loads(stdout_message)
+            except json.JSONDecodeError:
+                pass
+            else:
+                if isinstance(payload, dict) and isinstance(payload.get("error"), str):
+                    message = payload["error"]
+        if any(
+            marker in message
+            for marker in ("status 401", "status 403", "HTTP 401", "HTTP 403")
+        ):
+            return (
+                "Baseten authentication or model access was denied. "
+                "Run `.tools/bin/baseten auth login --web`, then verify access "
+                "to the configured BASETEN_MODEL_ID."
+            )
+        if "deactivated" in message.lower():
+            return (
+                "The configured Baseten production deployment is inactive. "
+                "Activate its production environment, then retry the analysis."
+            )
+        return (message or "Baseten CLI request failed.")[:500]
+
+    async def availability(
+        self, *, max_age_seconds: float = 5.0
+    ) -> tuple[bool, str | None]:
+        """Verify that the CLI can access the configured model, with a short cache."""
+
+        if not self.configured:
+            return False, "The Baseten CLI or model ID is not configured."
+        now = time.monotonic()
+        if (
+            self._availability is not None
+            and now - self._availability_checked_at < max_age_seconds
+        ):
+            return self._availability
+        process = await asyncio.create_subprocess_exec(
+            self.settings.baseten_cli_path,
+            "model",
+            "describe",
+            "--model-id",
+            self.settings.baseten_model_id,
+            "-o",
+            "json",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        try:
+            stdout, stderr = await asyncio.wait_for(
+                process.communicate(),
+                timeout=min(5.0, self.settings.baseten_request_timeout_seconds),
+            )
+        except TimeoutError:
+            process.kill()
+            await process.communicate()
+            result = (False, "Timed out while checking the configured Baseten model.")
+        else:
+            result = (
+                (True, None)
+                if process.returncode == 0
+                else (False, self._cli_error(stderr, stdout))
+            )
+        self._availability_checked_at = time.monotonic()
+        self._availability = result
+        return result
 
     async def _predict(
         self,
@@ -153,6 +256,7 @@ class BasetenUnderwriter:
             "temperature": 0,
             "max_tokens": 128,
             "chat_template_kwargs": {"enable_thinking": False},
+            "response_format": DECISION_RESPONSE_FORMAT,
         }
         async with semaphore:
             started = time.perf_counter()
@@ -182,8 +286,7 @@ class BasetenUnderwriter:
                     "The UnderwriteIQ model request exceeded the configured timeout."
                 ) from exc
         if process.returncode != 0:
-            message = stderr.decode().strip() or "Baseten CLI request failed."
-            raise RuntimeError(message[:500])
+            raise RuntimeError(self._cli_error(stderr, stdout))
         response = json.loads(stdout)
         content = response["choices"][0]["message"]["content"]
         decision = BasetenDecision.model_validate_json(content)
@@ -209,12 +312,37 @@ class BasetenUnderwriter:
     ) -> BasetenRunResult:
         semaphore = asyncio.Semaphore(self.settings.baseten_max_concurrency)
         started = time.perf_counter()
-        predictions = await asyncio.gather(
+        results = await asyncio.gather(
             *(
                 self._predict(submission, ledger, package, semaphore)
                 for submission, ledger in zip(submissions, ledgers)
-            )
+            ),
+            return_exceptions=True,
         )
+        # A single deployment can transiently reject or interrupt one request in a
+        # burst. Retry only those failed submissions after the batch has drained.
+        for index, result in enumerate(results):
+            if not isinstance(result, BaseException):
+                continue
+            try:
+                results[index] = await self._predict(
+                    submissions[index], ledgers[index], package, semaphore
+                )
+            except BaseException as retry_error:
+                results[index] = retry_error
+        predictions = [
+            result for result in results if isinstance(result, BasetenPrediction)
+        ]
+        failures = [
+            f"{submission.submission_number}: "
+            f"{str(result).strip() or type(result).__name__}"
+            for submission, result in zip(submissions, results)
+            if isinstance(result, BaseException)
+        ]
+        if submissions and not predictions:
+            raise RuntimeError(
+                failures[0] if failures else "No specialist prediction was returned."
+            )
         expected = {
             assessment.submission_id: _expected_disposition(assessment)
             for assessment in assessments
@@ -226,6 +354,7 @@ class BasetenUnderwriter:
         return BasetenRunResult(
             model=self.settings.baseten_model_name,
             predictions=predictions,
+            failures=failures,
             latency_ms=max(1, int((time.perf_counter() - started) * 1000)),
             prompt_tokens=sum(item.prompt_tokens for item in predictions),
             completion_tokens=sum(item.completion_tokens for item in predictions),

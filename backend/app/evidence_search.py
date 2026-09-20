@@ -18,6 +18,7 @@ class EvidenceSearch:
         self.records: dict[str, dict[str, dict[str, Any]]] = {}
         self.retrieved: dict[tuple[str, str, str], datetime] = {}
         self.conflicts: dict[tuple[str, str, str], list[Any]] = {}
+        self.skipped_rows = 0
         for resource, rows in loader.records.items():
             for row in rows:
                 self._ingest(resource, row)
@@ -25,10 +26,11 @@ class EvidenceSearch:
         self.ledgers = [mapper.build(item) for item in self.submissions]
         self.useful_changes = 0
 
-    def _ingest(self, resource: str, row: dict[str, Any]) -> None:
+    def _ingest(self, resource: str, row: dict[str, Any]) -> bool:
         identifier = _identifier(row)
         if identifier is None:
-            raise ValueError("Evidence queries must retain source record identifiers.")
+            self.skipped_rows += 1
+            return False
         stored = self.records.setdefault(resource, {}).setdefault(identifier, {})
         references = {ref.field: ref for ref in self.loader.registry.references_for(resource)}
         for field, value in row.items():
@@ -41,6 +43,7 @@ class EvidenceSearch:
                 for child in value if isinstance(value, list) else [value]:
                     if isinstance(child, dict):
                         self._ingest(references[field].target, child)
+        return True
 
     def coverage(self) -> dict[str, Any]:
         return {
@@ -57,6 +60,7 @@ class EvidenceSearch:
         resource = result["query"]["resource"]
         rows, _ = _rows(result["result"])
         before = {(l.submission_id, f.fact_id): (f.state, f.value) for l in self.ledgers for f in l.facts}
+        skipped_before = self.skipped_rows
         for row in rows:
             self._ingest(resource, row)
         records = {resource: list(items.values()) for resource, items in self.records.items()}
@@ -87,4 +91,9 @@ class EvidenceSearch:
         changed = sum(before[(l.submission_id, f.fact_id)] != (f.state, f.value) for l in fresh for f in l.facts)
         self.ledgers[:] = fresh
         self.useful_changes += changed
-        return {"records_found": len(rows), "useful_fact_changes": changed, **self.coverage()}
+        return {
+            "records_found": len(rows),
+            "unidentifiable_records": self.skipped_rows - skipped_before,
+            "useful_fact_changes": changed,
+            **self.coverage(),
+        }

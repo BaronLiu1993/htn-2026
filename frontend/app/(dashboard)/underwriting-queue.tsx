@@ -7,17 +7,17 @@ import {
   Database, ListFilter, LoaderCircle, RefreshCw, Search, Target, X,
 } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { analyzeSubmissions, fetchGuidelines, fetchHealth, fetchSubmissions } from "../../lib/api";
+import { analyzeSubmissions, fetchGuidelines, fetchHealth } from "../../lib/api";
 import type {
   AnalysisRun, Assessment, AssessmentStatus, EvidenceItem, GuidelineSummary,
-  HealthResponse, ModelProvider, QueueSubmission, RuleOutcome, TraceEvent, UnderwritingConsideration,
+  HealthResponse, ModelProvider, RuleOutcome, TraceEvent, UnderwritingConsideration,
 } from "../../lib/types";
 import "./underwriting-queue.css";
 
 type View = "queue" | "activity" | "guidelines";
 type Group = "Pursue" | "Investigate" | "Out of appetite";
 type StatusFilter = AssessmentStatus | null;
-type LoadedData = { health: HealthResponse; submissions: QueueSubmission[]; guidelines: GuidelineSummary[]; guideline: GuidelineSummary; run: AnalysisRun };
+type LoadedData = { health: HealthResponse; guidelines: GuidelineSummary[]; guideline: GuidelineSummary; run: AnalysisRun };
 type DisplayEvidence = {
   id: string; sourceKey: string; claim: string; record: string; field: string; value: string;
   ruleName: string; expected: string; note?: string; preview: string;
@@ -260,16 +260,16 @@ function Review({ assessment, run }: { assessment: Assessment; run: AnalysisRun 
   </div>;
 }
 
-function AccountReview({ assessment, run }: { assessment: Assessment; run: AnalysisRun }) {
+function AccountReview({ assessment, run, disabled = false }: { assessment: Assessment; run: AnalysisRun; disabled?: boolean }) {
   const label = assessment.status === "needs_review" ? "Resolve gap" : assessment.status === "out_of_appetite" ? "View exclusion" : "Review account";
-  return <Dialog.Root><Dialog.Trigger className="uw-text-button">{label} <span>↗</span></Dialog.Trigger><Dialog.Portal><Dialog.Backdrop className="uw-backdrop" /><Dialog.Popup className="uw-drawer"><Dialog.Close className="uw-close" aria-label="Close review"><X size={18} /></Dialog.Close><Review assessment={assessment} run={run} /></Dialog.Popup></Dialog.Portal></Dialog.Root>;
+  return <Dialog.Root><Dialog.Trigger className="uw-text-button" disabled={disabled}>{label} <span>↗</span></Dialog.Trigger><Dialog.Portal><Dialog.Backdrop className="uw-backdrop" /><Dialog.Popup className="uw-drawer"><Dialog.Close className="uw-close" aria-label="Close review"><X size={18} /></Dialog.Close><Review assessment={assessment} run={run} /></Dialog.Popup></Dialog.Portal></Dialog.Root>;
 }
 
 function Sidebar({ view, onView, run }: { view: View; onView: (view: View) => void; run: AnalysisRun }) {
-  return <aside className="uw-sidebar" aria-label="Underwriting navigation"><nav><button aria-current={view === "queue" ? "page" : undefined} onClick={() => onView("queue")}><ListFilter size={16} />Queue</button><button aria-current={view === "activity" ? "page" : undefined} onClick={() => onView("activity")}><Activity size={16} />Run activity</button></nav><div className="uw-sidebar-secondary"><button aria-current={view === "guidelines" ? "page" : undefined} onClick={() => onView("guidelines")}><BookOpen size={16} />Guidelines</button><div className="uw-data-state"><span />{run.mode === "demo" ? "Demo data" : "Live data"}<small>{run.assessments.length} assessed submissions</small></div></div></aside>;
+  return <aside className="uw-sidebar" aria-label="Underwriting navigation"><nav><button aria-current={view === "queue" ? "page" : undefined} onClick={() => onView("queue")}><ListFilter size={16} />Queue</button><button aria-current={view === "activity" ? "page" : undefined} onClick={() => onView("activity")}><Activity size={16} />Run activity</button></nav><div className="uw-sidebar-secondary"><button aria-current={view === "guidelines" ? "page" : undefined} onClick={() => onView("guidelines")}><BookOpen size={16} />Guidelines</button><div className="uw-data-state"><span />{run.mode === "demo" ? "Demo data" : "Live data"}<small>{run.applicable_submissions} of {run.total_submissions} in scope</small></div></div></aside>;
 }
 
-function Queue({ data, selectedModel, onRerun, onGuidelineChange, onModelChange, rerunning }: { data: LoadedData; selectedModel: ModelProvider; onRerun: () => void; onGuidelineChange: (id: string) => void; onModelChange: (provider: ModelProvider) => void; rerunning: boolean }) {
+function Queue({ data, selectedGuidelineId, selectedModel, onRerun, onGuidelineChange, onModelChange, rerunning }: { data: LoadedData; selectedGuidelineId: string; selectedModel: ModelProvider; onRerun: () => void; onGuidelineChange: (id: string) => void; onModelChange: (provider: ModelProvider) => void; rerunning: boolean }) {
   const { run, guideline, guidelines } = data;
   const [group, setGroup] = useState<Group>("Pursue");
   const [status, setStatus] = useState<StatusFilter>(null);
@@ -290,7 +290,8 @@ function Queue({ data, selectedModel, onRerun, onGuidelineChange, onModelChange,
   }
 
   return <main className="uw-queue">
-    <div className="uw-heading"><div><h1>Queue</h1><p>{assessments.length} submissions · {eligible} eligible · {unresolved} unresolved · {excluded} excluded</p></div><div className="uw-heading-actions"><label className="uw-model-switch"><span>Model</span><select value={selectedModel} onChange={(event) => onModelChange(event.target.value as ModelProvider)} disabled={rerunning}><option value="openai" disabled={!data.health.openai_configured}>OpenAI · evidence agent</option><option value="baseten" disabled={!data.health.baseten_configured}>UnderwriteIQ · Qwen3-8B</option></select></label><label className="uw-guideline-switch"><span className="uw-sr-only">Selected guideline</span><select value={guideline.id} onChange={(event) => onGuidelineChange(event.target.value)} disabled={rerunning}>{guidelines.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name} · {item.version}</option>)}</select></label><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
+    <div className="uw-heading"><div><h1>Queue</h1><p>{run.applicable_submissions} relevant submissions · {eligible} eligible · {unresolved} need review · {excluded} outside appetite</p>{run.total_submissions !== run.applicable_submissions && <p>{run.applicable_submissions} of {run.total_submissions} available match this guideline · {run.not_applicable_submissions} outside scope · {run.scope_unknown_submissions} scope unknown</p>}</div><div className="uw-heading-actions"><label className="uw-model-switch" title={data.health.baseten_error ?? undefined}><span>Model</span><select value={selectedModel} onChange={(event) => onModelChange(event.target.value as ModelProvider)} disabled={rerunning}><option value="openai" disabled={!data.health.openai_configured}>OpenAI · evidence agent</option><option value="baseten" disabled={!data.health.baseten_configured}>UnderwriteIQ · Qwen3-8B{data.health.baseten_configured ? "" : " (unavailable)"}</option></select></label><label className="uw-guideline-switch"><span className="uw-sr-only">Selected guideline</span><select value={selectedGuidelineId} onChange={(event) => onGuidelineChange(event.target.value)} disabled={rerunning}>{guidelines.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name} · {item.version}</option>)}</select></label><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
+    {rerunning && <div className="uw-inline-banner info" role="status"><LoaderCircle size={16} className="uw-spin" /><div><strong>Running a new analysis</strong><p>The queue below is from the previous completed run until the new run finishes.</p></div></div>}
     {run.status === "partial" && <div className="uw-inline-banner warning" role="status"><AlertTriangle size={16} /><div><strong>Partial analysis run</strong><p>{run.errors.join(" · ") || "Some submissions could not be assessed."}</p></div></div>}
     <section className="uw-status-cards" aria-label="Filter queue by appetite status">{cards.map((card) => {
       const Icon = card.icon;
@@ -298,7 +299,7 @@ function Queue({ data, selectedModel, onRerun, onGuidelineChange, onModelChange,
       return <button key={card.status} className={card.tone} aria-pressed={status === card.status} onClick={() => selectStatus(card.status)}><span><Icon size={14} />{card.label}</span><strong>{count}</strong><small>{status === card.status ? "Filtering queue" : "View accounts"}</small></button>;
     })}</section>
     <div className="uw-toolbar"><div className="uw-filters" aria-label="Action groups">{groups.map((item) => <button key={item} aria-pressed={group === item && status === null} data-current-group={group === item ? "" : undefined} onClick={() => { setGroup(item); setStatus(null); }}>{item}<span>{assessments.filter((assessment) => groupFor(assessment.status) === item).length}</span></button>)}</div><label className="uw-search"><span className="uw-sr-only">Search accounts</span><Search size={14} /><input placeholder="Search accounts…" value={search} onChange={(event) => setSearch(event.target.value)} /></label></div>
-    <div className="uw-table-wrap"><table><thead><tr><th>Account / assessment</th><th>Appetite</th><th>Target fit</th><th>Premium</th><th>Received</th><th>Next step</th></tr></thead><tbody>{rows.map((item) => <tr key={item.submission_id}><td><strong>{item.insured_name}</strong><small>{item.submission_number} · {item.primary_state ?? "State unavailable"} · {money(item.tiv)} TIV</small><p>{item.explanation}</p></td><td><Badge assessment={item} /></td><td>{item.status === "target" || item.status === "acceptable" ? <><strong>{item.target_matches} of {item.target_preferences_total}</strong><small>target preferences</small></> : <span className="uw-muted">Not scored</span>}</td><td>{money(item.premium)}</td><td>{dateText(item.received_date)}</td><td><AccountReview assessment={item} run={run} /></td></tr>)}</tbody></table>{!rows.length && <div className="uw-empty"><Database size={18} /><p>No accounts match this filter.</p><button onClick={() => { setSearch(""); setStatus(null); }}>Clear filters</button></div>}</div>
+    <div className={`uw-table-wrap${rerunning ? " is-loading" : ""}`} aria-busy={rerunning}><table><thead><tr><th>Account / assessment</th><th>Appetite</th><th>Target fit</th><th>Premium</th><th>Received</th><th>Next step</th></tr></thead><tbody>{rows.map((item) => <tr key={item.submission_id}><td><strong>{item.insured_name}</strong><small>{item.submission_number} · {item.primary_state ?? "State unavailable"} · {money(item.tiv)} TIV</small><p>{item.explanation}</p></td><td><Badge assessment={item} /></td><td>{item.status === "target" || item.status === "acceptable" ? <><strong>{item.target_matches} of {item.target_preferences_total}</strong><small>target preferences</small></> : <span className="uw-muted">Not scored</span>}</td><td>{money(item.premium)}</td><td>{dateText(item.received_date)}</td><td><AccountReview assessment={item} run={run} disabled={rerunning} /></td></tr>)}</tbody></table>{!rows.length && <div className="uw-empty"><Database size={18} /><p>No accounts match this filter.</p><button onClick={() => { setSearch(""); setStatus(null); }}>Clear filters</button></div>}</div>
     <div className="uw-footnote"><span>{guideline.name} · effective {dateText(guideline.effective_from)}</span><span>Recommendations require human review.</span></div>
   </main>;
 }
@@ -326,16 +327,33 @@ export default function UnderwritingQueue() {
   const [selectedModel, setSelectedModel] = useState<ModelProvider>("openai");
   const started = useRef(false);
   const load = useCallback(async (rerun = false, requestedGuidelineId?: string, requestedModel: ModelProvider = "openai") => {
-    if (rerun) setRerunning(true);
+    if (rerun) {
+      setRerunning(true);
+      setError(null);
+    }
     else setLoading(true);
     try {
-      const [health, submissions, guidelines] = await Promise.all([fetchHealth(), fetchSubmissions(), fetchGuidelines()]);
+      const [health, guidelines] = await Promise.all([fetchHealth(), fetchGuidelines()]);
+      setData((current) => current ? { ...current, health, guidelines } : current);
       const guideline = guidelines.find((item) => item.id === requestedGuidelineId) ?? guidelines[0];
       if (!guideline) throw new Error("No underwriting guideline is installed.");
-      const run = await analyzeSubmissions(guideline, submissions.map((item) => item.submission_id), requestedModel);
+      if (requestedModel === "baseten" && !health.baseten_configured) {
+        throw new Error(health.baseten_error || "The UnderwriteIQ model is unavailable.");
+      }
+      if (
+        requestedModel === "openai" &&
+        !health.openai_configured &&
+        !health.baseten_configured
+      ) {
+        throw new Error("No underwriting model is currently available.");
+      }
+      const model = requestedModel === "openai" && !health.openai_configured && health.baseten_configured
+        ? "baseten"
+        : requestedModel;
+      const run = await analyzeSubmissions(guideline, undefined, model);
       setSelectedGuidelineId(guideline.id);
-      setSelectedModel(requestedModel);
-      setData({ health, submissions, guidelines, guideline, run });
+      setSelectedModel(model);
+      setData({ health, guidelines, guideline, run });
       setError(null);
     } catch (caught) {
       setError(caught instanceof Error ? caught.message : "The underwriting queue could not be loaded.");
@@ -354,5 +372,5 @@ export default function UnderwritingQueue() {
   if (loading && !data) return <StatePage />;
   if (error && !data) return <StatePage error={error} retry={() => void load()} />;
   if (!data) return null;
-  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>No assessed submissions</h1><p>The batch run completed without an assessed account.</p></div> : view === "queue" ? <Queue data={data} selectedModel={selectedModel} onRerun={() => void load(true, selectedGuidelineId, selectedModel)} onGuidelineChange={(id) => void load(true, id, selectedModel)} onModelChange={(provider) => void load(true, selectedGuidelineId, provider)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines guideline={data.guideline} />}</div></div></div>;
+  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><div><strong>Rerun failed. Showing the previous completed run.</strong><span>{error}</span></div><button onClick={() => void load(true, selectedGuidelineId, selectedModel)}>Try again</button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>{data.run.errors.length ? "Analysis incomplete" : "No relevant submissions"}</h1><p>{data.run.errors.join(" · ") || `${data.run.scope_unknown_submissions} submissions have unknown scope; ${data.run.not_applicable_submissions} are outside this guideline.`}</p></div> : view === "queue" ? <Queue data={data} selectedGuidelineId={selectedGuidelineId} selectedModel={selectedModel} onRerun={() => void load(true, selectedGuidelineId, selectedModel)} onGuidelineChange={(id) => void load(true, id, selectedModel)} onModelChange={(provider) => void load(true, selectedGuidelineId, provider)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines guideline={data.guideline} />}</div></div></div>;
 }

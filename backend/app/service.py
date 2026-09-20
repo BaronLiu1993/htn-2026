@@ -28,6 +28,7 @@ from .models import (
     TraceEvent,
 )
 from .profile_registry import InvestigationProfile, ProfileRegistry
+from .rule_engine import scope_status
 from .schema_registry import SchemaRegistry
 from .tool_gateway import ToolGateway
 
@@ -78,21 +79,21 @@ class UnderwriteService:
         package: GuidelinePackage,
         *,
         force_refresh: bool = False,
-    ) -> tuple[list[SubmissionEvidence], str]:
+    ) -> tuple[list[SubmissionEvidence], str, LiveFederatoLoader, SchemaRegistry]:
         raw_schema = await gateway.schema(
             purpose="Identify available underwriting evidence"
         )
-        self.registry = SchemaRegistry(raw_schema)
+        registry = SchemaRegistry(raw_schema)
+        self.registry = registry
         self._schema_source = "live"
         loader = LiveFederatoLoader(
             gateway,
-            self.registry,
+            registry,
             gateway.trace.append,
             semantic_resources=package.source_plan.resources,
         )
         evidence = await loader.load()
-        self.loader = loader
-        return evidence, "live"
+        return evidence, "live", loader, registry
 
     async def _evidence(
         self,
@@ -100,20 +101,24 @@ class UnderwriteService:
         package: GuidelinePackage,
         *,
         force_refresh: bool = False,
-    ) -> tuple[list[SubmissionEvidence], str]:
+    ) -> tuple[list[SubmissionEvidence], str, LiveFederatoLoader, SchemaRegistry]:
         if self.mode == "live":
             return await self._live_evidence(gateway, package, force_refresh=force_refresh)
-        evidence, _ = await self._live_evidence(gateway, package, force_refresh=True)
+        evidence, _, loader, registry = await self._live_evidence(
+            gateway, package, force_refresh=True
+        )
         self._schema_source = "demo"
-        return evidence, "demo"
+        return evidence, "demo", loader, registry
 
     async def list_submissions(self) -> list[QueueSubmission]:
         package = self.guidelines.resolve(None)
         trace: list[TraceEvent] = []
         gateway = self._gateway(package, trace)
-        evidence, _ = await self._evidence(gateway, package)
+        evidence, _, _, _ = await self._evidence(gateway, package)
+        mapper = FactMapper(package)
         output: list[QueueSubmission] = []
         for item in evidence:
+            ledger = mapper.build(item)
             output.append(
                 QueueSubmission(
                     submission_id=item.id,
@@ -124,7 +129,7 @@ class UnderwriteService:
                     tiv=item.tiv,
                     primary_state=item.primary_state,
                     line_of_business=item.line_of_business,
-                    scope_status="applicable",
+                    scope_status=scope_status(package.scope, ledger),
                 )
             )
         return output
@@ -219,20 +224,25 @@ class UnderwriteService:
                 started=started,
                 provider=provider,
             )
-        if provider == "baseten" and not self.baseten.configured:
-            return self._failed_run(
-                run_id,
-                package,
-                trace,
-                ["The UnderwriteIQ model is unavailable. Configure the Baseten CLI and model ID, then restart the backend."],
-                schema_source="live" if self.mode == "live" else "demo",
-                started=started,
-                provider=provider,
-            )
+        if provider == "baseten":
+            baseten_available, baseten_error = await self.baseten.availability()
+            if not baseten_available:
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    [
+                        baseten_error
+                        or "The UnderwriteIQ model is unavailable. Configure the Baseten CLI and model ID."
+                    ],
+                    schema_source="live" if self.mode == "live" else "demo",
+                    started=started,
+                    provider=provider,
+                )
 
         try:
             gateway = self._gateway(package, trace)
-            evidence, schema_source = await self._evidence(
+            evidence, schema_source, loader, registry = await self._evidence(
                 gateway, package, force_refresh=request.force_schema_refresh
             )
         except Exception as exc:
@@ -246,9 +256,70 @@ class UnderwriteService:
                 provider=provider,
             )
 
-        if provider == "baseten":
+        mapper = FactMapper(package)
+        mapper.registry = registry
+        search = EvidenceSearch(loader, mapper)
+        if request.submission_ids:
+            requested_ids = set(request.submission_ids)
+            selected = [
+                (submission, ledger)
+                for submission, ledger in zip(search.submissions, search.ledgers)
+                if submission.id in requested_ids
+            ]
+            search.submissions[:] = [submission for submission, _ in selected]
+            search.ledgers[:] = [ledger for _, ledger in selected]
+        ledger_pairs = list(zip(search.submissions, search.ledgers))
+        total_submissions = len(ledger_pairs)
+        scope_states = {
+            submission.id: scope_status(package.scope, ledger)
+            for submission, ledger in ledger_pairs
+        }
+        applicable_ids = {
+            submission_id
+            for submission_id, state in scope_states.items()
+            if state == "applicable"
+        }
+        not_applicable_count = sum(
+            state == "not_applicable" for state in scope_states.values()
+        )
+        scope_unknown_count = sum(
+            state == "not_evaluated" for state in scope_states.values()
+        )
+        selected = [
+            (submission, ledger)
+            for submission, ledger in ledger_pairs
+            if submission.id in applicable_ids
+        ]
+        search.submissions[:] = [submission for submission, _ in selected]
+        search.ledgers[:] = [ledger for _, ledger in selected]
+        trace.append(
+            TraceEvent(
+                id=f"trace_{uuid4().hex[:10]}",
+                tool="prepare_queue",
+                purpose=f"Select submissions relevant to {package.name}",
+                status="success",
+                started_at=datetime.now(),
+                duration_ms=1,
+                fact_ids=[package.scope.fact],
+                result_summary=(
+                    f"Found {len(applicable_ids)} in-scope submissions from "
+                    f"{total_submissions} available; {not_applicable_count} are outside "
+                    f"scope and {scope_unknown_count} have unknown scope."
+                ),
+            )
+        )
+
+        if provider == "baseten" and applicable_ids:
             try:
-                evidence = await self.loader.load_declared_resources()
+                await loader.load_declared_resources()
+                search = EvidenceSearch(loader, mapper)
+                selected = [
+                    (submission, ledger)
+                    for submission, ledger in zip(search.submissions, search.ledgers)
+                    if submission.id in applicable_ids
+                ]
+                search.submissions[:] = [submission for submission, _ in selected]
+                search.ledgers[:] = [ledger for _, ledger in selected]
             except Exception as exc:
                 return self._failed_run(
                     run_id,
@@ -260,22 +331,10 @@ class UnderwriteService:
                     provider=provider,
                 )
 
-        mapper = FactMapper(package)
-        mapper.registry = self.registry
-        search = EvidenceSearch(self.loader, mapper)
-        if request.submission_ids:
-            requested_ids = set(request.submission_ids)
-            selected = [
-                (submission, ledger)
-                for submission, ledger in zip(search.submissions, search.ledgers)
-                if submission.id in requested_ids
-            ]
-            search.submissions[:] = [submission for submission, _ in selected]
-            search.ledgers[:] = [ledger for _, ledger in selected]
         ledger_pairs = list(zip(search.submissions, search.ledgers))
         mapped_facts, unsupported_facts = mapper.apply_schema_plan(
             [ledger for _, ledger in ledger_pairs],
-            self.registry or gateway.registry,
+            registry,
         )
         trace.append(
             TraceEvent(
@@ -292,33 +351,15 @@ class UnderwriteService:
                 ),
             )
         )
-        applicable = ledger_pairs
-        not_applicable_count = 0
-        trace.append(
-            TraceEvent(
-                id=f"trace_{uuid4().hex[:10]}",
-                tool="prepare_queue",
-                purpose=f"Review the full queue against {package.name}",
-                status="success",
-                started_at=datetime.now(),
-                duration_ms=1,
-                fact_ids=[package.scope.fact],
-                result_summary=(
-                    f"Prepared all {len(ledger_pairs)} submissions. Accounts that do not "
-                    "match the selected business type or requirements remain visible as "
-                    "outside appetite."
-                ),
-            )
-        )
 
         agent_result = None
-        if provider == "openai":
+        if provider == "openai" and search.submissions:
             try:
                 agent_result = await asyncio.wait_for(
                     self.agent.run(
                         search=search,
                         ledgers=search.ledgers,
-                        registry=self.registry or gateway.registry,
+                        registry=registry,
                         guideline=package,
                         profile=profile,
                         gateway=gateway,
@@ -354,6 +395,26 @@ class UnderwriteService:
                     started=started,
                     provider=provider,
                 )
+
+        failed_source_events = [
+            event
+            for event in trace
+            if event.tool == "federato_query" and event.status == "failure"
+        ]
+        if failed_source_events:
+            messages = [
+                event.error or "A required Federato evidence query failed."
+                for event in failed_source_events
+            ]
+            return self._failed_run(
+                run_id,
+                package,
+                trace,
+                list(dict.fromkeys(messages)),
+                schema_source=schema_source,
+                started=started,
+                provider=provider,
+            )
 
         applicable = list(zip(search.submissions, search.ledgers))
         resolved_by_agent = search.useful_changes
@@ -416,17 +477,29 @@ class UnderwriteService:
                     started=started,
                     provider=provider,
                 )
+            if baseten_result.failures:
+                errors.extend(
+                    f"UnderwriteIQ prediction failed for {failure}"
+                    for failure in baseten_result.failures
+                )
             trace.append(
                 TraceEvent(
                     id=f"trace_{uuid4().hex[:10]}",
                     tool="baseten_model",
                     purpose="Compare the specialist model with deterministic appetite results",
-                    status="success",
+                    status="retry" if baseten_result.failures else "success",
                     started_at=model_started,
                     duration_ms=baseten_result.latency_ms,
                     result_summary=(
-                        f"UnderwriteIQ Qwen agreed with the deterministic outcome for "
-                        f"{baseten_result.agreement_rate:.1%} of submissions."
+                        f"UnderwriteIQ Qwen returned {len(baseten_result.predictions)} of "
+                        f"{len(assessments)} predictions with "
+                        f"{baseten_result.agreement_rate:.1%} agreement."
+                    ),
+                    error=(
+                        "Some specialist predictions failed; deterministic assessments "
+                        "remain available."
+                        if baseten_result.failures
+                        else None
                     ),
                 )
             )
@@ -449,9 +522,10 @@ class UnderwriteService:
             guideline_version=package.version,
             guideline_effective_date=package.effective_from,
             profile_id=package.investigation_profile_id,
-            total_submissions=len(ledger_pairs),
+            total_submissions=total_submissions,
             applicable_submissions=len(applicable),
             not_applicable_submissions=not_applicable_count,
+            scope_unknown_submissions=scope_unknown_count,
             duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
             tool_call_count=gateway.calls,
             unresolved_fact_count=unresolved,
@@ -460,7 +534,9 @@ class UnderwriteService:
             activity=[event for event in trace if event.tool not in {"openai_agent", "plan_fact_sources"} or event.status == "failure"],
             agent_mode=provider,
             agent_model=(
-                agent_result.model if agent_result is not None else baseten_result.model
+                agent_result.model
+                if agent_result is not None
+                else baseten_result.model if baseten_result is not None else None
             ),
             agent_summary=(
                 f"Reviewed all {len(assessments)} submissions against {package.name}. "
@@ -478,19 +554,27 @@ class UnderwriteService:
             model_latency_ms=(
                 agent_result.model_latency_ms
                 if agent_result is not None
-                else baseten_result.latency_ms
+                else baseten_result.latency_ms if baseten_result is not None else 0
             ),
             model_prompt_tokens=(
                 agent_result.prompt_tokens
                 if agent_result is not None
-                else baseten_result.prompt_tokens
+                else baseten_result.prompt_tokens if baseten_result is not None else 0
             ),
             model_completion_tokens=(
                 agent_result.completion_tokens
                 if agent_result is not None
-                else baseten_result.completion_tokens
+                else baseten_result.completion_tokens if baseten_result is not None else 0
             ),
-            model_valid_output_rate=1.0,
+            model_valid_output_rate=(
+                1.0
+                if agent_result is not None
+                else (
+                    len(baseten_result.predictions) / len(assessments)
+                    if baseten_result is not None and assessments
+                    else 1.0 if baseten_result is not None else None
+                )
+            ),
             model_agreement_rate=(
                 baseten_result.agreement_rate if baseten_result is not None else None
             ),

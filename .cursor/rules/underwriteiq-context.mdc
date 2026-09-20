@@ -1,0 +1,53 @@
+---
+description: UnderwriteIQ project context imported from Codex (Sep 19 2026)
+alwaysApply: true
+---
+
+# UnderwriteIQ — working context
+
+Hack the North 2026 Federato challenge. Repo: `/Users/kash/Documents/htn-2026`. Current branch checkpoint: `main` @ `80e57df` (PR #1 model selector merged).
+
+## Product
+
+Guidance-agnostic underwriting harness: select a versioned guideline → retrieve Federato evidence → deterministic evaluation → ranked queue with evidence-backed explanations. Does **not** approve, price, quote, or bind.
+
+Statuses: `target` | `acceptable` | `needs_review` | `out_of_appetite`.
+
+## Architecture (do not blur these roles)
+
+- **OpenAI** (`gpt-5.6-terra`): flexible Federato schema inspection + evidence-query planning.
+- **UnderwriteIQ Qwen3-8B (Baseten)**: fast specialist on **normalized** appetite evidence; strict JSON.
+- **Deterministic guideline engine**: sole authority for final appetite outcome. Models cannot override verified rules.
+- UI can select provider via `model_provider`: `openai` | `baseten`.
+
+## Hard constraints from the user / Codex thread
+
+- Conserve usage: no Playwright/browser testing; no new backend tests; prefer compile + existing checks.
+- Do not redesign the UI, add production fallback mazes, or hard-code desired eligible counts.
+- Do not push/merge unless asked.
+- Credentials live in `.env` only — never commit or echo secrets.
+- Live Federato + sending derived underwriting data to OpenAI was already approved in the Codex thread; do not re-ask for that same consent.
+
+## Latest completed work (Codex)
+
+- Federato live integration, guideline packages, evidence ledger, tool gateway, demo mode.
+- Distillation/training pipeline + deployed Qwen3-8B on Baseten.
+- Frontend model selector + `MODEL_COMPARISON.md` (honest latency/token claims: model-call only, not full app).
+- Live smoke on `SUB-2026-00007`: Qwen ~581ms / 498 tokens vs OpenAI ~19s / ~46k tokens; full Qwen request still ~30s because Federato retrieval dominates.
+
+## Highest-priority remaining work
+
+See `UNDERWRITING_AGENT_HANDOFF.md` (supersedes older plan docs on conflict). In short:
+
+1. Diagnose Federato query failures (unknown nested `id` paths); capture exact payloads in internal run artifacts.
+2. **Scope before assess**: only evaluate submissions matching the selected guideline’s business scope; separate available / in-scope / outside-scope / scope-unknown / outside-appetite. Do not assess all ~158 against a property guideline.
+3. Targeted evidence queries for candidates only; useful attribution; fail runs visibly on required-source errors.
+4. Fix queue summary copy so totals match assessed population (`E + U + X = N`).
+5. Update acceptance script away from “158 assessments / zero outside-scope” assertions.
+
+## Key docs
+
+- `UNDERWRITING_AGENT_HANDOFF.md` — current task handoff
+- `README.md`, `MVP.md`, `MODEL_COMPARISON.md`
+- `backend/AGENTS.md`, `frontend/AGENTS.md`
+- Challenge PDF (local Downloads): Federato HTN2026 student guidelines

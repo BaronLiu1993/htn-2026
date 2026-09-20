@@ -155,6 +155,7 @@ export interface AnalysisRun {
   total_submissions: number;
   applicable_submissions: number;
   not_applicable_submissions: number;
+  scope_unknown_submissions: number;
   duration_ms: number;
   tool_call_count: number;
   unresolved_fact_count: number;
@@ -208,4 +209,5 @@ export interface HealthResponse {
   federato_configured: boolean;
   openai_configured: boolean;
   baseten_configured: boolean;
+  baseten_error?: string | null;
 }

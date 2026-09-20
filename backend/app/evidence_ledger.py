@@ -72,7 +72,9 @@ class FactMapper:
 
     def _collection_complete(self, submission: SubmissionEvidence, resource: str) -> bool:
         if not submission.raw_records:
-            return False
+            # Demo fixtures and the compatibility evaluator are already-normalized
+            # snapshots; their explicit collection values are the complete source.
+            return True
         target_ids = {str(row.get("id") or row.get("_id")) for name, rows in submission.raw_records.items() if normalized(name) == normalized(resource) for row in rows}
         references = getattr(self, "registry", None)
         if references is None:

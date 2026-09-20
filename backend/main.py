@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from pathlib import Path
-
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -42,13 +40,13 @@ async def root() -> dict[str, str]:
 
 @app.get("/api/health", response_model=HealthResponse)
 async def health() -> HealthResponse:
+    baseten_available, baseten_error = await service.baseten.availability()
     return HealthResponse(
         mode=service.mode,
         federato_configured=settings.federato_configured,
         openai_configured=settings.openai_configured,
-        baseten_configured=bool(
-            settings.baseten_model_id and Path(settings.baseten_cli_path).is_file()
-        ),
+        baseten_configured=baseten_available,
+        baseten_error=baseten_error,
     )
 
 

@@ -175,7 +175,10 @@ Run the credentialed acceptance gate from the repository root:
 ./.venv/bin/python scripts/run_guideline_acceptance.py
 ```
 
-The gate requires live Federato and OpenAI credentials. It accepts only a successful live run with all 158 loaded submissions assessed, ledger evidence, and no failed trace event.
+The gate requires live Federato and OpenAI credentials. It independently discovers the
+guideline's in-scope IDs from minimal queue evidence, requires the assessed IDs to match
+that set exactly, reconciles in-scope/outside-scope/scope-unknown counts, and rejects
+failed trace events. It does not hard-code the source queue size.
 
 ## Current limitations
 

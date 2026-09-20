@@ -8,7 +8,7 @@ import json
 import os
 import time
 from dataclasses import dataclass, field
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -315,7 +315,7 @@ def run(
     )
     return {
         "benchmark_id": matrix_doc["benchmark_id"],
-        "started_at": datetime.now(UTC).isoformat(),
+        "started_at": datetime.now(timezone.utc).isoformat(),
         "provider": model_config.provider,
         "model": model_config.model,
         "base_url": model_config.base_url,

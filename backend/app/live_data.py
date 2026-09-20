@@ -27,7 +27,7 @@ def _rows(payload: Any) -> tuple[list[dict[str, Any]], int | None]:
             nested, nested_total = _rows(value)
             if nested:
                 return nested, nested_total
-    if "id" in payload:
+    if "id" in payload or "_id" in payload:
         return [payload], 1
     return [], payload.get("total") if isinstance(payload.get("total"), int) else None
 
@@ -286,7 +286,9 @@ class LiveFederatoLoader:
         for item in records[submission_resource]:
             submission_id = _identifier(item)
             if submission_id is None:
-                continue
+                raise FederatoError(
+                    f"{submission_resource} returned a record without a usable identifier."
+                )
             graph = related((submission_resource, submission_id))
             policy_resource = resource_aliases.get("Policy")
             policies = graph.get(policy_resource, []) if policy_resource else []

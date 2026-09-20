@@ -89,7 +89,7 @@ class Settings:
                 5.0, min(float(os.getenv("BASETEN_REQUEST_TIMEOUT_SECONDS", "30")), 120.0)
             ),
             baseten_max_concurrency=max(
-                1, min(int(os.getenv("BASETEN_MAX_CONCURRENCY", "16")), 32)
+                1, min(int(os.getenv("BASETEN_MAX_CONCURRENCY", "4")), 32)
             ),
         )
 

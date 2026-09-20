@@ -1,0 +1,33 @@
+{
+  "dataset": "data/benchmark.jsonl",
+  "invalid_examples": [],
+  "metrics": {
+    "estimated_inference_cost_usd": 0.0,
+    "evidence": {
+      "f1": 1.0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "examples": 54,
+    "hard_exclusion_recall": 1.0,
+    "json_validity": 1.0,
+    "latency_ms": {
+      "mean": 0.484,
+      "p50": 0.461,
+      "p95": 0.672
+    },
+    "missing_field_accuracy": 1.0,
+    "rule": {
+      "f1": 1.0,
+      "precision": 1.0,
+      "recall": 1.0
+    },
+    "status_accuracy": 1.0,
+    "tokens": {
+      "input": 83858,
+      "output": 68857
+    }
+  },
+  "model": "Qwen/Qwen3-4B",
+  "provider": "oracle"
+}

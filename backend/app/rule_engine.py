@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Literal
 
 from .evidence_ledger import evidence_items, normalized
 from .guideline_registry import GuidelinePackage, GuidelineRule, ScopePredicate
@@ -32,6 +32,19 @@ def matches(operator: str, actual: Any, expected: Any) -> bool:
 def scope_matches(scope: ScopePredicate, ledger: EvidenceLedger) -> bool:
     fact = ledger.fact(scope.fact)
     return bool(fact and fact.state == "verified" and matches(scope.operator, fact.value, scope.value))
+
+
+def scope_status(
+    scope: ScopePredicate, ledger: EvidenceLedger
+) -> Literal["applicable", "not_applicable", "not_evaluated"]:
+    fact = ledger.fact(scope.fact)
+    if fact is None or fact.state != "verified":
+        return "not_evaluated"
+    return (
+        "applicable"
+        if matches(scope.operator, fact.value, scope.value)
+        else "not_applicable"
+    )
 
 
 def evaluate_rule(rule: GuidelineRule, fact: EvidenceFact | None, kind: str) -> RuleOutcome:

@@ -138,13 +138,13 @@ Your job is to resolve canonical facts before deterministic evaluation. You rece
 
 Every query purpose is shown directly to an underwriter. Write it as a short business explanation, for example: "Check five-year incurred losses because the guideline requires total losses below $100,000." Do not mention JSON, schemas, tool calls, canonical IDs, planning turns, or implementation details in that purpose.
 
-Query syntax is exact: the expand stage is the reference tree itself; never add another "expand" wrapper inside that tree. Sort entries are {"field":"name","direction":"asc"}. Select is either a list of field paths or a nested projection object. For broad queue evidence, prefer a direct query of a discovered resource with IDs in $in, then expand only references declared on that resource.
+Query syntax is exact: the expand stage is the reference tree itself; never add another "expand" wrapper inside that tree. Sort entries are {"field":"name","direction":"asc"}. Select only fields declared directly on the queried resource. Never use a dotted path through a reference such as "submission.id"; select the reference field itself or query the target resource directly. For broad queue evidence, prefer a direct query of a discovered resource with IDs in $in, then expand only references declared on that resource.
 
 The deterministic evaluator runs after evidence gathering and is authoritative. You cannot change rule outcomes. Preserve missing, conflicting, ambiguous, and unavailable facts. Do not claim external enrichment was performed unless a tool returned it.
 
 Grounding is strict: for each explanation, evidence_ids must be a subset of that same submission's allowed_evidence_ids. Copy those IDs exactly. A related record ID returned by a query is not an allowed citation unless that exact ID also appears in allowed_evidence_ids. Tool results may inform the prose, but they do not expand the citation allowlist.
 
-The initial message includes the live schema and complete selected guideline. You can inspect them again if useful. Query in batches across the complete queue. Retain id and relationship fields on every returned record, including expanded records, so evidence can be attributed. Do not aggregate or rename fields: the ledger computes the guideline aggregates from source observations. Retrieve the next page when a page is full. After each query, use the updated ledger coverage to choose the next useful search. Stop when all facts are verified, no useful search remains, or the remaining budget is zero. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Prefer a broad queue query followed by a focused query only when the first result shows missing or contradictory evidence. Keep each query purpose concise. Do not draft submission decisions before the deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
+The initial message includes the live schema and complete selected guideline. You can inspect them again if useful. Query in batches across the selected in-scope candidates. Retain each queried resource's declared identifier and its direct relationship fields so evidence can be attributed; do not invent an id beneath an expanded reference. Do not aggregate or rename fields: the ledger computes the guideline aggregates from source observations. Retrieve the next page when a page is full. After each query, use the updated ledger coverage to choose the next useful search. Stop when all facts are verified, no useful search remains, or the remaining budget is zero. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Prefer a broad candidate query followed by a focused query only when the first result shows missing or contradictory evidence. Keep each query purpose concise. Do not draft submission decisions before the deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
 """
 
 
@@ -489,7 +489,11 @@ class UnderwritingAgent:
             )
             return {"ok": False, "error": str(exc), "repairable": True}
         except Exception as exc:
-            return {"ok": False, "error": "Federato query failed safely.", "repairable": True}
+            return {
+                "ok": False,
+                "error": f"Federato query failed: {str(exc)[:500]}",
+                "repairable": True,
+            }
 
 
 def apply_agent_report(
