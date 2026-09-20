@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
@@ -44,6 +46,9 @@ async def health() -> HealthResponse:
         mode=service.mode,
         federato_configured=settings.federato_configured,
         openai_configured=settings.openai_configured,
+        baseten_configured=bool(
+            settings.baseten_model_id and Path(settings.baseten_cli_path).is_file()
+        ),
     )
 
 

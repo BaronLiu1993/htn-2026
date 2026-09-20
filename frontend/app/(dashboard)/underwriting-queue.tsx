@@ -10,7 +10,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { analyzeSubmissions, fetchGuidelines, fetchHealth, fetchSubmissions } from "../../lib/api";
 import type {
   AnalysisRun, Assessment, AssessmentStatus, EvidenceItem, GuidelineSummary,
-  HealthResponse, QueueSubmission, RuleOutcome, TraceEvent, UnderwritingConsideration,
+  HealthResponse, ModelProvider, QueueSubmission, RuleOutcome, TraceEvent, UnderwritingConsideration,
 } from "../../lib/types";
 import "./underwriting-queue.css";
 
@@ -269,7 +269,7 @@ function Sidebar({ view, onView, run }: { view: View; onView: (view: View) => vo
   return <aside className="uw-sidebar" aria-label="Underwriting navigation"><nav><button aria-current={view === "queue" ? "page" : undefined} onClick={() => onView("queue")}><ListFilter size={16} />Queue</button><button aria-current={view === "activity" ? "page" : undefined} onClick={() => onView("activity")}><Activity size={16} />Run activity</button></nav><div className="uw-sidebar-secondary"><button aria-current={view === "guidelines" ? "page" : undefined} onClick={() => onView("guidelines")}><BookOpen size={16} />Guidelines</button><div className="uw-data-state"><span />{run.mode === "demo" ? "Demo data" : "Live data"}<small>{run.assessments.length} assessed submissions</small></div></div></aside>;
 }
 
-function Queue({ data, onRerun, onGuidelineChange, rerunning }: { data: LoadedData; onRerun: () => void; onGuidelineChange: (id: string) => void; rerunning: boolean }) {
+function Queue({ data, selectedModel, onRerun, onGuidelineChange, onModelChange, rerunning }: { data: LoadedData; selectedModel: ModelProvider; onRerun: () => void; onGuidelineChange: (id: string) => void; onModelChange: (provider: ModelProvider) => void; rerunning: boolean }) {
   const { run, guideline, guidelines } = data;
   const [group, setGroup] = useState<Group>("Pursue");
   const [status, setStatus] = useState<StatusFilter>(null);
@@ -290,7 +290,7 @@ function Queue({ data, onRerun, onGuidelineChange, rerunning }: { data: LoadedDa
   }
 
   return <main className="uw-queue">
-    <div className="uw-heading"><div><h1>Queue</h1><p>{assessments.length} submissions · {eligible} eligible · {unresolved} unresolved · {excluded} excluded</p></div><div className="uw-heading-actions"><label className="uw-guideline-switch"><span className="uw-sr-only">Selected guideline</span><select value={guideline.id} onChange={(event) => onGuidelineChange(event.target.value)} disabled={rerunning}>{guidelines.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name} · {item.version}</option>)}</select></label><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
+    <div className="uw-heading"><div><h1>Queue</h1><p>{assessments.length} submissions · {eligible} eligible · {unresolved} unresolved · {excluded} excluded</p></div><div className="uw-heading-actions"><label className="uw-model-switch"><span>Model</span><select value={selectedModel} onChange={(event) => onModelChange(event.target.value as ModelProvider)} disabled={rerunning}><option value="openai" disabled={!data.health.openai_configured}>OpenAI · evidence agent</option><option value="baseten" disabled={!data.health.baseten_configured}>UnderwriteIQ · Qwen3-8B</option></select></label><label className="uw-guideline-switch"><span className="uw-sr-only">Selected guideline</span><select value={guideline.id} onChange={(event) => onGuidelineChange(event.target.value)} disabled={rerunning}>{guidelines.map((item) => <option key={`${item.id}-${item.version}`} value={item.id}>{item.name} · {item.version}</option>)}</select></label><button className="uw-rerun" onClick={onRerun} disabled={rerunning}>{rerunning ? <LoaderCircle size={13} className="uw-spin" /> : <RefreshCw size={13} />}{rerunning ? "Running" : "Rerun"}</button></div></div>
     {run.status === "partial" && <div className="uw-inline-banner warning" role="status"><AlertTriangle size={16} /><div><strong>Partial analysis run</strong><p>{run.errors.join(" · ") || "Some submissions could not be assessed."}</p></div></div>}
     <section className="uw-status-cards" aria-label="Filter queue by appetite status">{cards.map((card) => {
       const Icon = card.icon;
@@ -304,7 +304,8 @@ function Queue({ data, onRerun, onGuidelineChange, rerunning }: { data: LoadedDa
 }
 
 function RunActivity({ run }: { run: AnalysisRun }) {
-  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Run activity</h1><p>Evidence checks and decisions for this queue.</p></div><span className="uw-rubric-state">{run.status}</span></div><div className="uw-run-summary"><div><span>Created</span><strong>{dateText(run.created_at, true)}</strong></div><div><span>Agent</span><strong>{run.agent_model ?? run.agent_mode}</strong></div><div><span>Evidence checks</span><strong>{run.query_count}</strong></div></div>{run.agent_summary && <p className="uw-support-note">{run.agent_summary}</p>}{run.agent_adaptations.length > 0 && <ul className="uw-adaptations">{run.agent_adaptations.map((item) => <li key={item}>{item}</li>)}</ul>}<TraceList events={run.activity} emptyLabel="This run did not return trace events." />{run.errors.length > 0 && <div className="uw-inline-banner warning"><AlertTriangle size={16} /><div><strong>Run errors</strong><p>{run.errors.join(" · ")}</p></div></div>}</main>;
+  const tokens = run.model_prompt_tokens + run.model_completion_tokens;
+  return <main className="uw-supporting-view"><div className="uw-heading"><div><h1>Run activity</h1><p>Evidence checks and decisions for this queue.</p></div><span className="uw-rubric-state">{run.status}</span></div><div className="uw-run-summary"><div><span>Model</span><strong>{run.agent_model ?? run.agent_mode}</strong></div><div><span>Total run</span><strong>{(run.duration_ms / 1000).toFixed(1)} sec</strong></div><div><span>Model time</span><strong>{(run.model_latency_ms / 1000).toFixed(1)} sec</strong></div><div><span>Tokens</span><strong>{tokens ? tokens.toLocaleString("en-US") : "Not reported"}</strong></div>{run.model_agreement_rate !== null && run.model_agreement_rate !== undefined && <div><span>Rule-engine agreement</span><strong>{(run.model_agreement_rate * 100).toFixed(1)}%</strong></div>}</div>{run.agent_summary && <p className="uw-support-note">{run.agent_summary}</p>}{run.agent_adaptations.length > 0 && <ul className="uw-adaptations">{run.agent_adaptations.map((item) => <li key={item}>{item}</li>)}</ul>}<TraceList events={run.activity} emptyLabel="This run did not return trace events." />{run.errors.length > 0 && <div className="uw-inline-banner warning"><AlertTriangle size={16} /><div><strong>Run errors</strong><p>{run.errors.join(" · ")}</p></div></div>}</main>;
 }
 
 function Guidelines({ guideline }: { guideline: GuidelineSummary }) {
@@ -322,16 +323,18 @@ export default function UnderwritingQueue() {
   const [loading, setLoading] = useState(true);
   const [rerunning, setRerunning] = useState(false);
   const [selectedGuidelineId, setSelectedGuidelineId] = useState("");
+  const [selectedModel, setSelectedModel] = useState<ModelProvider>("openai");
   const started = useRef(false);
-  const load = useCallback(async (rerun = false, requestedGuidelineId?: string) => {
+  const load = useCallback(async (rerun = false, requestedGuidelineId?: string, requestedModel: ModelProvider = "openai") => {
     if (rerun) setRerunning(true);
     else setLoading(true);
     try {
       const [health, submissions, guidelines] = await Promise.all([fetchHealth(), fetchSubmissions(), fetchGuidelines()]);
       const guideline = guidelines.find((item) => item.id === requestedGuidelineId) ?? guidelines[0];
       if (!guideline) throw new Error("No underwriting guideline is installed.");
-      const run = await analyzeSubmissions(guideline, submissions.map((item) => item.submission_id));
+      const run = await analyzeSubmissions(guideline, submissions.map((item) => item.submission_id), requestedModel);
       setSelectedGuidelineId(guideline.id);
+      setSelectedModel(requestedModel);
       setData({ health, submissions, guidelines, guideline, run });
       setError(null);
     } catch (caught) {
@@ -351,5 +354,5 @@ export default function UnderwritingQueue() {
   if (loading && !data) return <StatePage />;
   if (error && !data) return <StatePage error={error} retry={() => void load()} />;
   if (!data) return null;
-  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>No assessed submissions</h1><p>The batch run completed without an assessed account.</p></div> : view === "queue" ? <Queue data={data} onRerun={() => void load(true, selectedGuidelineId)} onGuidelineChange={(id) => void load(true, id)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines guideline={data.guideline} />}</div></div></div>;
+  return <div className="uw-app"><header className="uw-topbar"><div className="uw-brand"><span className="uw-brand-mark">u</span><span>underwrite</span><i />Submission review</div><div className="uw-header-right">{data.health.mode === "demo" ? <span className="uw-demo">Fictional demo</span> : <span className="uw-live">Live data</span>}<span className="uw-avatar" aria-hidden="true">UW</span></div></header>{error && <div className="uw-global-error" role="alert"><AlertTriangle size={15} /><span>{error}</span><button onClick={() => setError(null)} aria-label="Dismiss error"><X size={14} /></button></div>}<div className="uw-shell"><Sidebar view={view} onView={setView} run={data.run} /><div className="uw-content">{!data.run.assessments.length && view === "queue" ? <div className="uw-state-page embedded"><Database size={20} /><h1>No assessed submissions</h1><p>The batch run completed without an assessed account.</p></div> : view === "queue" ? <Queue data={data} selectedModel={selectedModel} onRerun={() => void load(true, selectedGuidelineId, selectedModel)} onGuidelineChange={(id) => void load(true, id, selectedModel)} onModelChange={(provider) => void load(true, selectedGuidelineId, provider)} rerunning={rerunning} /> : view === "activity" ? <RunActivity run={data.run} /> : <Guidelines guideline={data.guideline} />}</div></div></div>;
 }

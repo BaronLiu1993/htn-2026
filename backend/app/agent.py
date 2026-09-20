@@ -235,6 +235,9 @@ class AgentRunResult:
     model: str
     tool_calls: int
     query_results: list[dict[str, Any]] = field(default_factory=list)
+    model_latency_ms: int = 0
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
 
 
 class UnderwritingAgent:
@@ -300,6 +303,9 @@ class UnderwritingAgent:
         total_tool_calls = 0
         query_results: list[dict[str, Any]] = []
         response_schema = AgentReport.model_json_schema()
+        model_latency_ms = 0
+        prompt_tokens = 0
+        completion_tokens = 0
 
         for turn in range(self.settings.openai_max_turns):
             guideline_called = "get_guideline" in called_tools
@@ -339,6 +345,11 @@ class UnderwritingAgent:
                 payload["tools"] = TOOL_DEFINITIONS
                 payload["parallel_tool_calls"] = False
             response = await self.transport.create(payload)
+            elapsed_ms = max(1, int((time.perf_counter() - started) * 1000))
+            model_latency_ms += elapsed_ms
+            usage = response.get("usage") or {}
+            prompt_tokens += int(usage.get("input_tokens") or usage.get("prompt_tokens") or 0)
+            completion_tokens += int(usage.get("output_tokens") or usage.get("completion_tokens") or 0)
             output = response.get("output", [])
             calls = [item for item in output if item.get("type") == "function_call"]
             trace.append(
@@ -348,7 +359,7 @@ class UnderwritingAgent:
                     purpose="Decide which underwriting evidence to check next",
                     status="success",
                     started_at=datetime.now(),
-                    duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+                    duration_ms=elapsed_ms,
                     result_summary=(
                         "The agent identified another evidence check that could resolve a "
                         "guideline question"
@@ -382,6 +393,9 @@ class UnderwritingAgent:
                     model=str(response.get("model") or self.settings.openai_model),
                     tool_calls=total_tool_calls,
                     query_results=query_results,
+                    model_latency_ms=model_latency_ms,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
                 )
 
             input_items.extend(_function_call_input(call) for call in calls)
