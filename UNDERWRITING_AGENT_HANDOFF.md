@@ -1,112 +1,131 @@
-# Handoff: UnderwriteIQ (imported from Codex → Cursor)
+# Handoff: correct guideline scope, evidence queries, and queue counts
 
-Continue UnderwriteIQ in `/Users/kash/Documents/htn-2026`.
+Continue UnderwriteIQ in `/Users/naveed/htn-2026`.
 
 ## Start here
 
-- Current checkpoint: `80e57df` on `main` (`Merge pull request #1` — selectable Baseten underwriting model). In sync with `origin/main`.
+- Current checkpoint: `4db103a` on local `main` (`Implement guideline-driven underwriting evidence search`). It has not been pushed by this task.
 - Read `backend/AGENTS.md` and `frontend/AGENTS.md` before editing their code.
-- Read this handoff before `GUIDANCE_AGNOSTIC_HARNESS_PLAN.md`. This handoff supersedes conflicting decisions in older plan docs.
-- Challenge reference (local): Federato HTN2026 student guidelines PDF under Downloads.
-- Conserve usage: no Playwright/browser testing; do not add backend tests; use focused existing verification and compilation.
-- Cursor always-on context: `.cursor/rules/underwriteiq-context.mdc` (extracted from Codex session `01a0ba72…`).
-
-## What Codex already shipped
-
-- Federato OAuth + live schema/query path, guideline packages, evidence ledger, deterministic evaluator, demo mode.
-- OpenAI Responses agent for evidence planning; deterministic engine remains final authority.
-- Distillation/training pipeline; Qwen deployed on Baseten; UI provider selector (`openai` | `baseten`).
-- Performance write-up in `MODEL_COMPARISON.md`. Honest claim: Qwen model-call ~33× faster / ~94× fewer tokens on `SUB-2026-00007`; full request still ~30s because Federato retrieval dominates. Do not claim the whole app is 33× faster.
-- Held-out specialist benchmark (decline-heavy, oracle labels): ~96% disposition accuracy / ~96% rule micro-F1 / ~93% exact match / 100% valid JSON — measures appetite-rule application, not underwriter replacement.
+- Read this handoff before `GUIDANCE_AGNOSTIC_HARNESS_PLAN.md`. This handoff supersedes conflicting decisions in that older plan and the previous handoff.
+- Challenge reference: `/Users/naveed/Downloads/Federato_HTN2026_API_Challenge_Docs/STUDENT_PROJECT_GUIDELINES.pdf`.
+- The user wants to conserve usage. Do not use Playwright or browser testing. Do not add backend tests. Use focused existing verification and compilation.
 
 ## Latest product decision — replaces assess-everything behavior
 
-The user rejected queue summaries like:
+The user rejected the current queue summary:
 
 `158 submissions · 0 eligible · 9 unresolved · 149 excluded`
 
-Identify submissions relevant to the selected guideline **before** detailed evidence and appetite assessment. Query only fields/related records needed for that work. Do not assess all ~158 against a property guideline just because they are available.
+Identify submissions relevant to the selected guideline before collecting detailed evidence and assessing appetite. Query only the fields and related records needed for that work. Do not assess all 158 submissions against a property guideline simply because they are available.
 
-For Guideline A, use its declared commercial-property scope. Discover the live in-scope population from data. Do not hard-code ~40, 38, or 158.
+For Guideline A, use its declared commercial-property scope. The relevant population may be around 40; discover its actual size from live data. Do not hard-code 40, the older estimate of 38, or the total of 158. We want to show the traces of how we search via the agent traces.
 
 Keep these concepts separate:
 
-- **Available:** total submissions in the source queue (cheap count if supported).
-- **In scope:** match selected guideline business scope → evidence, assessment, ranking.
-- **Outside scope:** different business line — not appetite failures; not “excluded” assessments.
-- **Scope unknown:** missing/conflicting scope evidence — report separately; do not silently discard.
-- **Outside appetite:** in-scope submission with confirmed hard-rule failure — keep visible.
+- **Available:** total submissions in the source queue, if a cheap supported count is available.
+- **In scope:** submissions matching the selected guideline's business scope; these receive evidence gathering, deterministic assessment, and ranking.
+- **Outside scope:** submissions for a different business line; these are not appetite failures and do not appear as excluded assessments.
+- **Scope unknown:** missing or conflicting scope evidence; report separately and attempt a focused lookup. Do not silently discard these submissions or count them as confirmed in scope.
+- **Outside appetite:** an in-scope submission with a confirmed hard-rule failure. Keep it visible in the assessed queue.
 
-Scope filtering is not a way to hide unfavorable underwriting results. Do not pre-filter in-scope accounts by premium, TIV, losses, construction, or other eligibility rules.
+Scope filtering is not a shortcut for hiding unfavorable underwriting results. Do not filter out in-scope accounts by premium, TIV, losses, construction, or other eligibility requirements before assessment.
 
-Guideline selector remains the only user-controlled setting. Preserve queue-first layout/sidebar. Do not add technical configuration controls.
+The guideline selector remains the only user-controlled setting. Preserve the queue-first layout and sidebar. Do not add technical configuration controls.
 
-## Known failure evidence (still open)
+## Current implementation and evidence
 
-User-supplied activity trace:
+The code now loads submission identity/link fields, gives the agent the live schema and guideline, and updates an evidence ledger after each agent query. `EvidenceSearch` stores source records and rebuilds facts. Final explanations come from deterministic rule outcomes with source references. The UI uses an activity projection.
 
-1. Failed broad evidence query: `Federato returned HTTP 500 ... [NOT_FOUND] Unknown field in path "id"`.
-2. Successful first-segment query: 100 records, 725 changed facts.
-3. Another query: 100 records, zero changed facts.
-4. Completed-looking queue summary despite the failed query.
+A ledger is the per-submission evidence record: each fact's value, state, source record, field, retrieval time, and available source date. It is needed to tell missing source data apart from failed retrieval or mapping. It is an internal audit structure, not another user setting.
 
-Exact failed payload was not captured. Do not invent which nested `id` failed. 546 unresolved facts have no single proven cause yet (pagination, mapping, normalization, missing data).
+Verification already completed:
+
+- Frontend lint and TypeScript checks passed.
+- Python compilation and seven existing schema/demo query checks passed.
+- Offline replay: 12 assessments, 3 queries, 94 fact changes, 2 unresolved facts, zero failed trace events. Claim retrieval changed four actual intermediate outcomes from needs review to target/acceptable. This is a scripted replay, not proof of live model reasoning.
+- One live acceptance run completed in 42.6 seconds: 158 assessments, 4 queries, 725 fact changes, 546 unresolved facts, 149 outside appetite, 9 needs review, zero failed events in that run's summary.
+
+That live acceptance check only proved its old completion criteria. It did not establish adequate evidence coverage or correct scoping. Do not repeat the claim that these totals demonstrate a correct result.
+
+The user subsequently supplied a different activity trace containing:
+
+1. A failed broad evidence query: `Federato returned HTTP 500 ... [NOT_FOUND] Unknown field in path "id"`.
+2. A successful first-segment query: 100 returned records and 725 changed facts.
+3. Another successful query: 100 returned records and zero changed facts.
+4. A completed-looking queue summary despite the failed query.
+
+The exact failed payload was not captured in the supplied text. Do not claim to know which nested `id` caused it until the payload and schema are inspected. The 546 unresolved facts likewise have no established single cause yet. Pagination, relationship mapping, field normalization, and actual missing data all need evidence-based inspection.
 
 ## Remaining work, in order
 
-### 1. Capture evidence to diagnose query failure
+### 1. Capture the evidence needed to diagnose the query failure
 
 Files: `backend/app/tool_gateway.py`, `backend/app/agent.py`, `backend/app/schema_registry.py`, `scripts/run_guideline_acceptance.py`.
 
-- Persist exact query payload + schema digest in an **internal** run artifact (counts, pagination, mapping, failures). Do not expose raw queries as primary UI or store credentials.
-- Record failing resource/field path; inspect live schema — do not assume every object has `id`.
-- Fix identifier assumptions across loader, mapper, and agent instructions together.
-- Required-source Federato failure must fail the run visibly; do not show a previous successful run’s summary as the current run.
+- Preserve the exact query payload and schema digest in an internal run artifact, together with returned counts, pagination, mapping counts, and failure details. Do not expose raw queries as primary UI copy or store credentials.
+- Record which resource and field path failed. Inspect the live schema instead of assuming every object exposes `id`.
+- Check how validation handles nested projections, expanded references, arrays, and identifier fields. A query passing local validation must not rely on invented paths.
+- Retain the source's actual identifiers and relationships needed to assign evidence. Correct identifier assumptions in the loader, mapper, and agent instructions together.
+- Reconcile the user's continued run after a required Federato failure with the intended fail-visible behavior. Ensure the UI does not display a previous successful run's summary as the summary of a failed rerun.
 
-### 2. Select guideline population before detailed retrieval
+Done when the failing query shape has an explained cause and its replacement is grounded in the discovered schema.
+
+### 2. Select the guideline population before detailed retrieval
 
 Files: `backend/app/service.py`, `backend/app/live_data.py`, `backend/app/guideline_registry.py`, `backend/app/rule_engine.py`, `backend/app/models.py`.
 
-- Translate package scope predicate to real source fields; prefer server-side scope query; paginate fully (do not treat one 100-record page as the queue).
-- Preserve separate scope counts vs assessment counts. Stop marking every loaded submission applicable.
-- Report scope-unknown explicitly.
+- Resolve the selected package and discover the live schema.
+- Translate the package's scope predicate to the actual source fields/relationships. Use a server-side scope query where supported. Use the proper pre-expansion `where` or post-expansion `filter` stage and `$elemMatch` at array boundaries.
+- If server-side scope selection cannot preserve unknown values, retrieve only minimal identity and scope fields across the queue, separate known matches/nonmatches/unknowns, and fetch details only for candidates and targeted scope resolution.
+- Retrieve every page of the selected population. Do not treat a 100-record page as the entire queue.
+- Preserve separate scope counts and assessment counts in the API. Remove the current assignment that marks every loaded submission applicable.
+- Do not silently omit scope-unknown accounts. Report their count and next action separately.
 
-Done when assessment IDs equal independently verified in-scope IDs, with scope-unknown accounted for.
+Done when assessment IDs equal the independently verified in-scope IDs, with scope-unknown submissions explicitly accounted for.
 
 ### 3. Make each evidence query targeted and useful
 
 Files: `backend/app/agent.py`, `backend/app/evidence_search.py`, `backend/app/evidence_ledger.py`, `backend/app/live_data.py`.
 
-- Give the agent candidate IDs, unresolved questions, coverage, schema, remaining budget.
-- Batch projections/expansions/filters for those candidates; avoid per-submission spam and unrelated resource scans.
-- Diagnose zero-change queries honestly; attribute by `(resource, source identifier)`.
-- Stop on resolved facts, no useful search left, or budget exhausted; record stop reason.
+- Give the agent the selected candidate IDs/link IDs, unresolved questions, current coverage, schema, and remaining query budget.
+- Let the agent choose batched projections, expansions, and filters for those candidates. Avoid per-submission requests and broad unrelated resource scans.
+- Return valid structured coverage and newly discovered relationship IDs after each query, so the agent can plan a useful follow-up without guessing links.
+- Diagnose zero-change queries: distinguish repeated facts, unrelated records, records with no owner, unsupported mappings, and missing returned fields. Do not count returned records as useful evidence merely because they exist.
+- Audit attribution by `(resource, source identifier)`, including shared records, nested references, and reverse links if the schema requires them. Never attach an unrelated record just because its ID matches in another resource.
+- Confirm aggregate completeness before verifying building minima, construction shares, or loss totals. An unqueried or partially retrieved claim collection must not mean zero losses.
+- Preserve contradictory observations, actual source paths, retrieval times, source dates, and missing states. Count state/value changes separately from resolved facts.
+- Stop when required facts are resolved, no useful search remains, or budget is exhausted. Record the stop reason and unresolved facts by reason.
 
-### 4. Correct queue summary and failure presentation
+Done when a live agent-selected query demonstrably resolves a previously missing fact, and the final deterministic assessment uses that evidence. Preserve the existing offline replay as a fast development check.
+
+### 4. Correct the queue summary and failure presentation
 
 Files: `frontend/lib/types.ts`, `frontend/lib/api.ts`, `frontend/app/(dashboard)/underwriting-queue.tsx`, `backend/app/service.py`, `backend/app/evaluator.py`.
 
-- Summary like `N relevant · E eligible · U need review · X outside appetite` with `E + U + X = N` (eligible = target + acceptable).
-- Optional secondary: `N of T available match this guideline` using live counts.
-- Scope-unknown separate from assessed-with-unresolved-facts.
-- Do not label unrelated business as appetite exclusions.
-- One business activity event per query; keep implementation details internal.
-- Explanations stay 2–3 sentences: result, evidence-backed factors, recommended action.
+- Keep the existing layout and compact selector.
+- Show a summary such as `N relevant submissions · E eligible · U need review · X outside appetite`, with `E + U + X = N` for completed assessments. Define eligible as target plus acceptable.
+- If useful, show `N of T available submissions match this guideline` as secondary context. Use actual counts, not the illustrative N≈40 or T=158.
+- Show scope-unknown accounts separately from assessed accounts with unresolved underwriting facts.
+- Do not label known unrelated business as excluded by appetite rules.
+- Show one business activity event per query, with evidence found, affected submissions, and useful changes. Keep implementation details internal.
+- A required-source failure must fail the run visibly. Preserve any prior completed result only with a clear indication that it belongs to the previous run.
+- Keep each explanation to 2–3 sentences: appetite result, evidence-backed key factors, and recommended action.
 
-### 5. Replace old acceptance criteria and verify once
+Done when the visible population, status totals, and run state agree with the underlying result.
+
+### 5. Replace the old acceptance criteria and verify once
 
 Files: `scripts/run_guideline_acceptance.py`, `scripts/smoke_openai_agent.py`, `README.md`.
 
-- Drop assertions requiring 158 assessments and zero outside-scope.
-- Compare exact candidate IDs from independent minimal scope evidence.
-- Persist local trace/ledger artifact for the run.
-- Compile + existing checks; frontend lint/`tsc` if UI touched; no Playwright; no new backend tests.
-- One focused live acceptance after that. Live Federato + OpenAI consent already granted in Codex — do not re-ask.
+- Remove assertions requiring 158 assessments and zero outside-scope submissions. Discover expected candidate IDs independently from minimal scope evidence and compare exact IDs, not just totals.
+- Confirm no duplicate assessments, no missed pages, no unrelated assessments, and explicit handling of scope-unknown accounts.
+- Report available/in-scope/outside-scope/scope-unknown counts, assessed count, duration, query count, status counts, unresolved facts by reason, useful fact changes, and failed events.
+- Persist a local trace/ledger artifact for the run. Do not rely only on a terminal summary that cannot explain gaps afterward.
+- Run Python compilation and relevant existing checks. Do not add backend tests. Run frontend lint and `tsc --noEmit` if frontend code changes. Do not use Playwright.
+- Then run one focused live acceptance. The user explicitly approved live Federato access and sending derived underwriting data to OpenAI in this conversation; do not ask for that same consent again. Request tool-level escalation if the sandbox requires it.
+
+Completion requires correct selection and useful evidence attribution, not merely a successful HTTP response or completed run. Report remaining gaps candidly rather than forcing all accounts to have complete evidence.
 
 ## Boundaries
 
-Do not redesign the UI, add production-style fallback paths, change deterministic guideline thresholds, or hard-code a desired eligible count. Do not push or merge unless requested. Leave untracked local tooling (`.tools/`, training artifacts) out of implementation commits unless explicitly asked.
-
-## Secrets note
-
-Codex chat history contained pasted API keys/client secrets. Those must stay in `.env` only. If any secret was committed or shared outside `.env`, rotate it. Never paste secrets into rules, handoffs, or chat.
+Do not redesign the UI, add production-style fallback paths, change deterministic guideline thresholds, or hard-code a desired eligible count. Do not push or merge additional changes unless requested. Current progress is saved locally on main; `.playwright-cli/` is an untracked temporary artifact and should remain outside the implementation commit.

@@ -60,7 +60,26 @@ async def main(fixture: bool = False) -> int:
             before = evaluate_ledger(submission, missing, run.run_id, package=service.guideline)
             if before.status != assessment.status:
                 transitions.append({"submission_id": assessment.submission_id, "before": before.status, "after": assessment.status})
-    report = {"verification": "offline replay" if fixture else "OpenAI demo", "status": run.status, "assessment_count": len(run.assessments), "query_count": run.query_count, "duration_ms": run.duration_ms, "status_counts": dict(Counter(item.status for item in run.assessments)), "unresolved_facts": run.unresolved_fact_count, "useful_fact_changes": run.useful_fact_changes, "failed_trace_events": sum(event.status == "failure" for event in run.trace), "loss_evidence_outcome_changes": transitions, "errors": run.errors}
+    report = {
+        "verification": "offline replay" if fixture else "OpenAI demo",
+        "status": run.status,
+        "available_submissions": run.available_submissions,
+        "in_scope_submissions": run.in_scope_submissions,
+        "outside_scope_submissions": run.outside_scope_submissions,
+        "scope_unknown_submissions": run.scope_unknown_submissions,
+        "assessment_count": len(run.assessments),
+        "query_count": run.query_count,
+        "query_metrics": run.query_metrics,
+        "duration_ms": run.duration_ms,
+        "status_counts": dict(Counter(item.status for item in run.assessments)),
+        "unresolved_facts": run.unresolved_fact_count,
+        "unresolved_facts_by_reason": run.unresolved_facts_by_reason,
+        "agent_stop_reason": run.agent_stop_reason,
+        "useful_fact_changes": run.useful_fact_changes,
+        "failed_trace_events": sum(event.status == "failure" for event in run.trace),
+        "loss_evidence_outcome_changes": transitions,
+        "errors": run.errors,
+    }
     print(json.dumps(report, indent=2))
     return 0 if run.status == "completed" and len(run.assessments) == 12 and run.useful_fact_changes > 0 and transitions else 1
 

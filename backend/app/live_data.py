@@ -1,13 +1,16 @@
 from __future__ import annotations
 
-import re
 import asyncio
+import re
 from collections import defaultdict, deque
+from dataclasses import dataclass
 from datetime import date, datetime
 from typing import Any, Callable
 
 from .federato_client import FederatoError
+from .guideline_registry import GuidelinePackage
 from .models import BuildingEvidence, ClaimEvidence, SubmissionEvidence, TraceEvent
+from .rule_engine import matches
 from .schema_registry import SchemaRegistry
 
 
@@ -76,6 +79,14 @@ def _number(value: Any) -> float | None:
     return None
 
 
+def _text(value: Any) -> str | None:
+    if value is None or value == "":
+        return None
+    if isinstance(value, bool):
+        return None
+    return str(value)
+
+
 def _boolean(value: Any) -> bool | None:
     if isinstance(value, bool):
         return value
@@ -107,27 +118,112 @@ def _date(value: Any) -> date | None:
 
 
 def _identifier(record: dict[str, Any]) -> str | None:
-    value = record.get("id") or record.get("_id")
-    return str(value) if value is not None else None
+    return SchemaRegistry.canonical_identifier(record.get("id") or record.get("_id"))
 
 
-def _claim_total(record: dict[str, Any]) -> float | None:
-    direct = _number(
-        _first(record, ("loss_value", "incurred_loss", "total_incurred", "amount"))
-    )
-    if direct is not None:
-        return direct
-    components = [
-        _number(_first(record, (field,)))
-        for field in (
-            "paid_indemnity",
-            "paid_expense",
-            "reserve_indemnity",
-            "reserve_expense",
+def _ids_match(left: Any, right: Any) -> bool:
+    first = SchemaRegistry.canonical_identifier(left)
+    second = SchemaRegistry.canonical_identifier(right)
+    return first is not None and first == second
+
+
+def _ref_ids(value: Any) -> list[str]:
+    if value is None:
+        return []
+    items = value if isinstance(value, list) else [value]
+    identifiers: list[str] = []
+    for item in items:
+        identifier = (
+            _identifier(item)
+            if isinstance(item, dict)
+            else SchemaRegistry.canonical_identifier(item)
         )
+        if identifier:
+            identifiers.append(identifier)
+    return identifiers
+
+
+def _unique_records(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    seen: set[str] = set()
+    output: list[dict[str, Any]] = []
+    for row in rows:
+        identifier = _identifier(row)
+        if identifier is None:
+            output.append(row)
+            continue
+        if identifier in seen:
+            continue
+        seen.add(identifier)
+        output.append(row)
+    return output
+
+
+def _headquarters_location(
+    registry: SchemaRegistry,
+    insured: dict[str, Any] | None,
+    insured_resource: str | None,
+    location_resource: str | None,
+    graph: dict[str, list[dict[str, Any]]],
+) -> dict[str, Any] | None:
+    if not insured or not insured_resource or not location_resource:
+        return None
+    hq_field = next(
+        (
+            reference.field
+            for reference in registry.references_for(insured_resource)
+            if reference.target == location_resource
+            and _key(reference.field) in {"hq", "headquarters"}
+        ),
+        None,
+    )
+    if not hq_field:
+        return None
+    nested = insured.get(hq_field)
+    if isinstance(nested, dict) and _identifier(nested):
+        return nested
+    hq_ids = set(_ref_ids(nested))
+    for row in graph.get(location_resource, []):
+        if _identifier(row) in hq_ids:
+            return row
+    return None
+
+
+def _buildings_on_location(
+    location: dict[str, Any] | None,
+    building_resource: str | None,
+    graph: dict[str, list[dict[str, Any]]],
+) -> list[dict[str, Any]]:
+    if not location or not building_resource:
+        return []
+    nested = location.get("buildings")
+    nested_rows = [
+        item
+        for item in (nested if isinstance(nested, list) else [nested])
+        if isinstance(item, dict)
     ]
-    known = [value for value in components if value is not None]
-    return sum(known) if known else None
+    ids = set(_ref_ids(nested))
+    from_graph = [
+        row
+        for row in graph.get(building_resource, [])
+        if _identifier(row) in ids
+    ]
+    return _unique_records([*nested_rows, *from_graph])
+
+
+@dataclass
+class ScopeSelection:
+    resource: str
+    identifier_field: str
+    records: list[dict[str, Any]]
+    in_scope_ids: list[str]
+    outside_scope_ids: list[str]
+    unknown_scope_ids: list[str]
+    duplicate_ids: list[str]
+    reported_total: int | None
+
+    @property
+    def available_count(self) -> int:
+        return len({identifier for row in self.records if (identifier := _identifier(row))})
 
 
 class LiveFederatoLoader:
@@ -135,29 +231,55 @@ class LiveFederatoLoader:
 
     FIELD_ALIASES = {
         "Submission": (
-            "submission_number", "number", "reference_number", "received_date",
-            "submission_date", "created_at", "insured_name", "line_of_business",
+            "submission_number",
+            "number",
+            "reference_number",
+            "received_date",
+            "submission_date",
+            "created_at",
+            "insured_name",
+            "line_of_business",
+        ),
+        "Insured": (
+            "name",
+            "account_name",
+            "insured_name",
+            "legal_name",
         ),
         "Policy": (
-            "business_type", "line_of_business", "premium", "total_premium",
-            "written_premium", "tiv", "total_tiv", "total_insured_value", "dates",
-        ),
-        "Insured": ("name", "account_name", "insured_name", "legal_name"),
-        "Location": (
-            "state", "state_code", "primary_state", "risk_state", "address",
-            "hazard_tags", "occupancy", "protection_class",
+            "business_type",
+            "premium",
+            "total_premium",
+            "written_premium",
+            "line_of_business",
+            "submission",
         ),
         "Building": (
-            "year_built", "construction_year", "built_year", "construction_type",
-            "construction", "construction_class", "tiv", "building_value",
-            "contents_value", "business_interruption_value", "occupancy", "sprinklered",
+            "tiv",
+            "total_insured_value",
+            "year_built",
+            "construction_year",
+            "construction_type",
+            "construction",
         ),
         "Claim": (
-            "loss_date", "date_of_loss", "occurred_at", "loss_value",
-            "incurred_loss", "total_incurred", "amount", "paid_indemnity",
-            "paid_expense", "reserve_indemnity", "reserve_expense", "status", "litigated",
+            "loss_date",
+            "date_of_loss",
+            "loss_value",
+            "paid_indemnity",
+            "paid_expense",
+            "reserve_indemnity",
+            "reserve_expense",
         ),
-        "ExposureUnit": ("basis", "basis_amount", "kind", "classification"),
+        "Location": (
+            "state",
+            "state_code",
+            "primary_state",
+            "buildings",
+        ),
+        "ExposureUnit": (
+            "location",
+        ),
     }
 
     def __init__(
@@ -172,8 +294,15 @@ class LiveFederatoLoader:
         self.trace_sink = trace_sink
         self.semantic_resources = semantic_resources or ["Submission"]
         self.records: dict[str, list[dict[str, Any]]] = {}
+        self.scope_selection: ScopeSelection | None = None
 
-    def _select_fields(self, resource: str, semantic: str) -> list[str]:
+    def _select_fields(
+        self,
+        resource: str,
+        semantic: str,
+        *,
+        required_fields: tuple[str, ...] = (),
+    ) -> list[str]:
         fields = self.registry.fields_for(resource)
         by_key = {_key(name): name for name in fields}
         wanted = {
@@ -187,40 +316,197 @@ class LiveFederatoLoader:
         for identifier in ("id", "_id"):
             if identifier in fields:
                 wanted.add(identifier)
+        wanted.update(field for field in required_fields if field in fields)
         return sorted(wanted)
 
-    async def _query_all(self, resource: str, semantic: str) -> list[dict[str, Any]]:
+    async def _query_all(
+        self,
+        resource: str,
+        semantic: str,
+        *,
+        required_fields: tuple[str, ...] = (),
+        where: dict[str, Any] | None = None,
+        purpose: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int | None]:
         all_rows: list[dict[str, Any]] = []
         offset = 0
         limit = 100
-        selected_fields = self._select_fields(resource, semantic)
+        reported_total: int | None = None
+        selected_fields = self._select_fields(
+            resource,
+            semantic,
+            required_fields=required_fields,
+        )
         while True:
             query = {
                 "resource": resource,
                 "pagination": {"limit": limit, "offset": offset},
             }
+            if where:
+                query["where"] = where
             if selected_fields:
                 query["select"] = selected_fields
-            self.registry.validate_query(query)
-            try:
-                payload = await self.client.query(
-                    query,
-                    purpose=f"Retrieve {resource} evidence",
+            payload = await self.client.query(
+                query,
+                purpose=purpose or f"Need {resource} evidence.",
+            )
+            page, total = _rows(payload)
+            annotate = getattr(self.client, "annotate_query", None)
+            if callable(annotate):
+                annotate(
+                    getattr(self.client, "last_query_audit_id", None),
+                    {
+                        "query_stage": "scope_selection",
+                        "records_found": len(page),
+                    },
                 )
-                page, total = _rows(payload)
-                all_rows.extend(page)
-            except Exception as exc:
-                raise
+            if total is not None:
+                reported_total = total
+            all_rows.extend(page)
             if len(page) < limit or (total is not None and len(all_rows) >= total):
                 break
             offset += limit
-        return all_rows
+        return all_rows, reported_total
+
+    async def load_insured_records(
+        self,
+        submission_resource: str,
+        submissions: list[dict[str, Any]],
+    ) -> None:
+        insured_resource = self.registry.find_resource("Insured")
+        if insured_resource is None:
+            return
+        direct_name_aliases = ("name", "account_name", "insured_name", "legal_name")
+        insured_ids = {
+            target_id
+            for submission in submissions
+            if _first(submission, direct_name_aliases) in (None, "")
+            for target_resource, target_id in self.registry.iter_reference_values(
+                submission_resource, submission
+            )
+            if target_resource == insured_resource
+        }
+        insured_ids -= {
+            identifier
+            for row in self.records.get(insured_resource, [])
+            if (identifier := _identifier(row)) is not None
+        }
+        if not insured_ids:
+            return
+        identifier_field = self.registry.identifier_field(insured_resource)
+        native_ids = [
+            self.registry.coerce_identifier(insured_resource, identifier)
+            for identifier in sorted(insured_ids)
+        ]
+        insured_rows, _ = await self._query_all(
+            insured_resource,
+            "Insured",
+            where={identifier_field: {"$in": native_ids}},
+            purpose="Need the insured name for the selected submissions.",
+        )
+        self.records.setdefault(insured_resource, []).extend(insured_rows)
+
+    async def load_scope(
+        self,
+        package: GuidelinePackage,
+        *,
+        requested_ids: list[str] | None = None,
+    ) -> ScopeSelection:
+        resource = self.registry.find_resource(package.scope.source.resource)
+        if resource is None:
+            raise FederatoError(
+                f'The discovered schema has no {package.scope.source.resource} scope resource.'
+            )
+        field = package.scope.source.field
+        if not self.registry.field_exists(resource, field):
+            raise FederatoError(
+                f'The declared scope field "{field}" is unavailable on {resource}.'
+            )
+        identifier_field = self.registry.identifier_field(resource)
+        rows, reported_total = await self._query_all(
+            resource,
+            "Submission",
+            required_fields=(field,),
+            purpose="Find submissions that match this guideline.",
+        )
+        requested = {
+            identifier
+            for value in (requested_ids or [])
+            if (identifier := SchemaRegistry.canonical_identifier(value))
+        }
+        in_scope: list[str] = []
+        outside_scope: list[str] = []
+        unknown: list[str] = []
+        seen: set[str] = set()
+        duplicates: list[str] = []
+        missing_identifiers = 0
+        selected_rows: list[dict[str, Any]] = []
+        for row in rows:
+            identifier = _identifier(row)
+            if identifier is None:
+                missing_identifiers += 1
+                continue
+            if identifier in seen:
+                duplicates.append(identifier)
+                continue
+            seen.add(identifier)
+            if requested and identifier not in requested:
+                continue
+            selected_rows.append(row)
+            value = _first(row, (field,))
+            if value is None or value == "":
+                unknown.append(identifier)
+            elif matches(package.scope.operator, value, package.scope.value):
+                in_scope.append(identifier)
+            else:
+                outside_scope.append(identifier)
+        if missing_identifiers:
+            raise FederatoError(
+                f"Scope selection returned {missing_identifiers} record(s) without identifiers."
+            )
+        if reported_total is not None and len(rows) != reported_total:
+            raise FederatoError(
+                f"Scope pagination returned {len(rows)} of {reported_total} reported records."
+            )
+        self.scope_selection = ScopeSelection(
+            resource=resource,
+            identifier_field=identifier_field,
+            records=selected_rows,
+            in_scope_ids=in_scope,
+            outside_scope_ids=outside_scope,
+            unknown_scope_ids=unknown,
+            duplicate_ids=duplicates,
+            reported_total=reported_total,
+        )
+        candidate_rows: list[dict[str, Any]] = []
+        if in_scope:
+            candidate_set = set(in_scope)
+            candidate_rows = [
+                row
+                for row in selected_rows
+                if _identifier(row) in candidate_set
+            ]
+        self.records = {resource: candidate_rows}
+        await self.load_insured_records(resource, candidate_rows)
+        annotate = getattr(self.client, "annotate_query", None)
+        if callable(annotate):
+            annotate(
+                getattr(self.client, "last_query_audit_id", None),
+                {
+                    "in_scope_records": len(in_scope),
+                    "outside_scope_records": len(outside_scope),
+                    "scope_unknown_records": len(unknown),
+                },
+            )
+        return self.scope_selection
 
     async def load(self) -> list[SubmissionEvidence]:
         resource = self.registry.find_resource("Submission")
         if not resource:
             raise FederatoError("The discovered schema has no Submission resource.")
-        self.records = {resource: await self._query_all(resource, "Submission")}
+        rows, _ = await self._query_all(resource, "Submission")
+        self.records = {resource: rows}
+        await self.load_insured_records(resource, rows)
         return self.normalize(self.records)
 
     async def load_declared_resources(self) -> list[SubmissionEvidence]:
@@ -236,7 +522,7 @@ class LiveFederatoLoader:
                 *(self._query_all(resource, semantic) for resource, semantic in pending)
             )
             self.records.update(
-                {resource: rows for (resource, _), rows in zip(pending, pages)}
+                {resource: rows for (resource, _), (rows, _) in zip(pending, pages)}
             )
         return self.normalize(self.records)
 
@@ -251,6 +537,9 @@ class LiveFederatoLoader:
 
         index: dict[tuple[str, str], dict[str, Any]] = {}
         adjacency: dict[tuple[str, str], set[tuple[str, str]]] = defaultdict(set)
+        expected_links: dict[tuple[str, str], dict[str, set[str]]] = defaultdict(
+            lambda: defaultdict(set)
+        )
         for resource, items in records.items():
             for item in items:
                 identifier = _identifier(item)
@@ -258,71 +547,223 @@ class LiveFederatoLoader:
                     index[(resource, identifier)] = item
         for (resource, identifier), item in index.items():
             node = (resource, identifier)
+            for reference in self.registry.references_for(resource):
+                if reference.field in item and item[reference.field] == []:
+                    expected_links[node].setdefault(reference.target, set())
             for target_resource, target_id in self.registry.iter_reference_values(resource, item):
                 target = (target_resource, target_id)
+                expected_links[node][target_resource].add(target_id)
                 if target in index:
                     adjacency[node].add(target)
                     adjacency[target].add(node)
 
-
-        def related(start: tuple[str, str]) -> dict[str, list[dict[str, Any]]]:
+        def related(
+            start: tuple[str, str],
+        ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, set[str]]]:
             found: dict[str, list[dict[str, Any]]] = defaultdict(list)
+            expected: dict[str, set[str]] = defaultdict(set)
             queue: deque[tuple[tuple[str, str], int]] = deque([(start, 0)])
             seen = {start}
             while queue:
                 node, depth = queue.popleft()
+                if (
+                    node != start
+                    and node[0] == submission_resource
+                    and node[1] != start[1]
+                ):
+                    continue
                 record = index.get(node)
                 if record is not None:
                     found[node[0]].append(record)
+                    for target_resource, identifiers in expected_links.get(node, {}).items():
+                        expected[target_resource].update(identifiers)
                 if depth >= 4:
                     continue
                 for neighbor in adjacency.get(node, set()):
+                    if (
+                        neighbor[0] == submission_resource
+                        and neighbor[1] != start[1]
+                    ):
+                        continue
                     if neighbor not in seen:
                         seen.add(neighbor)
                         queue.append((neighbor, depth + 1))
-            return found
+            return found, expected
 
         normalized: list[SubmissionEvidence] = []
-        for item in records[submission_resource]:
+        for item in records.get(submission_resource, []):
             submission_id = _identifier(item)
             if submission_id is None:
-                raise FederatoError(
-                    f"{submission_resource} returned a record without a usable identifier."
-                )
-            graph = related((submission_resource, submission_id))
+                continue
+            graph, expected = related((submission_resource, submission_id))
             policy_resource = resource_aliases.get("Policy")
-            policies = graph.get(policy_resource, []) if policy_resource else []
+            exposure_resource = resource_aliases.get("ExposureUnit")
+            location_resource = resource_aliases.get("Location")
+            building_resource = resource_aliases.get("Building")
+            claim_resource = resource_aliases.get("Claim")
+            related_policies = graph.get(policy_resource, []) if policy_resource else []
+            policies = [
+                policy
+                for policy in related_policies
+                if not _ref_ids(policy.get("submission"))
+                or any(
+                    _ids_match(submission_id, item)
+                    for item in _ref_ids(policy.get("submission"))
+                )
+            ]
+            if policies:
+                policy_ids = {identifier for policy in policies if (identifier := _identifier(policy))}
+                claim_ids = {identifier for policy in policies for identifier in _ref_ids(policy.get("claims"))}
+                exposure_ids = {
+                    identifier
+                    for policy in policies
+                    for identifier in _ref_ids(policy.get("exposure_units"))
+                }
+                exposures = [
+                    row
+                    for row in (graph.get(exposure_resource, []) if exposure_resource else [])
+                    if _identifier(row) in exposure_ids
+                ]
+                location_ids = {
+                    identifier
+                    for row in exposures
+                    for identifier in _ref_ids(row.get("location"))
+                } | {
+                    identifier
+                    for policy in policies
+                    for identifier in _ref_ids(policy.get("locations"))
+                }
+                locations = [
+                    row
+                    for row in (graph.get(location_resource, []) if location_resource else [])
+                    if _identifier(row) in location_ids
+                ]
+                building_ids = {
+                    identifier
+                    for row in locations
+                    for identifier in _ref_ids(row.get("buildings"))
+                } | {
+                    identifier
+                    for policy in policies
+                    for identifier in _ref_ids(policy.get("buildings"))
+                }
+                buildings = [
+                    row
+                    for row in (graph.get(building_resource, []) if building_resource else [])
+                    if _identifier(row) in building_ids
+                ]
+                claims = [
+                    row
+                    for row in (graph.get(claim_resource, []) if claim_resource else [])
+                    if _identifier(row) in claim_ids
+                ]
+                if exposure_resource:
+                    graph[exposure_resource] = exposures
+                    expected[exposure_resource] = exposure_ids
+                if policy_resource:
+                    graph[policy_resource] = policies
+                    expected[policy_resource] = policy_ids
+                if claim_resource:
+                    graph[claim_resource] = claims
+                    expected[claim_resource] = claim_ids
+            else:
+                if policy_resource:
+                    graph.pop(policy_resource, None)
+                    expected.pop(policy_resource, None)
+                if claim_resource:
+                    graph.pop(claim_resource, None)
+                    expected.pop(claim_resource, None)
+                if exposure_resource:
+                    graph.pop(exposure_resource, None)
+                    expected.pop(exposure_resource, None)
+                locations = []
+                buildings = []
+                claims = []
             policy = policies[0] if policies else None
             insured_resource = resource_aliases.get("Insured")
             insured = (graph.get(insured_resource, []) or [None])[0] if insured_resource else None
-            location_resource = resource_aliases.get("Location")
-            locations = graph.get(location_resource, []) if location_resource else []
-            building_resource = resource_aliases.get("Building")
-            buildings = graph.get(building_resource, []) if building_resource else []
-            claim_resource = resource_aliases.get("Claim")
-            claims = graph.get(claim_resource, []) if claim_resource else []
+            hq_location = _headquarters_location(
+                self.registry,
+                insured,
+                insured_resource,
+                location_resource,
+                graph,
+            )
+            hq_buildings = _buildings_on_location(
+                hq_location,
+                building_resource,
+                graph,
+            )
+            if policies:
+                if hq_location:
+                    locations = _unique_records([*locations, hq_location])
+                if hq_buildings:
+                    buildings = _unique_records([*buildings, *hq_buildings])
+            elif hq_location or hq_buildings:
+                locations = [hq_location] if hq_location else locations
+                buildings = hq_buildings or buildings
+            else:
+                locations = list(graph.get(location_resource, []) if location_resource else [])
+                buildings = list(graph.get(building_resource, []) if building_resource else [])
+            if location_resource:
+                graph[location_resource] = locations
+                expected[location_resource] = {
+                    identifier
+                    for row in locations
+                    if (identifier := _identifier(row))
+                }
+            if building_resource:
+                graph[building_resource] = buildings
+                expected[building_resource] = {
+                    identifier
+                    for row in buildings
+                    if (identifier := _identifier(row))
+                }
 
             source = policy or item
             insured_name = _first(
-                insured or item,
+                insured,
+                ("name", "account_name", "insured_name", "legal_name"),
+            ) or _first(
+                item,
+                ("name", "account_name", "insured_name", "legal_name"),
+            ) or _first(
+                source,
                 ("name", "account_name", "insured_name", "legal_name"),
             )
+            state_record = hq_location or (locations[0] if locations else None)
             state = _first(
-                locations[0] if locations else source,
-                ("state", "state_code", "primary_state", "risk_state"),
+                state_record,
+                ("state", "state_code", "primary_state", "risk_state", "address.state"),
+            ) or _first(
+                source,
+                ("state", "state_code", "primary_state", "risk_state", "address.state"),
             )
+            occupancy_record = hq_location or (locations[0] if locations else None)
+            location_occupancy = _first(
+                occupancy_record,
+                ("occupancy", "occupancy_type", "building_use", "use_type"),
+            )
+            location_protection = _first(
+                occupancy_record,
+                ("protection_class", "public_protection_class", "ppc"),
+            )
+            policy_tiv = _number(_first(policy, ("tiv", "total_insured_value", "total_tiv"))) if policy else None
             building_models = [
                 BuildingEvidence(
                     id=_identifier(building) or f"building-{idx}",
                     year_built=int(year) if (year := _number(_first(building, ("year_built", "construction_year", "built_year")))) is not None else None,
-                    construction_type=_first(
+                    construction_type=_text(_first(
                         building,
                         ("construction_type", "construction", "construction_class"),
-                    ),
+                    )),
                     tiv=_number(_first(building, ("tiv", "total_insured_value", "value"))),
-                    occupancy=_first(
-                        building,
-                        ("occupancy", "occupancy_type", "building_use", "use_type"),
+                    occupancy=_text(
+                        _first(
+                            building,
+                            ("occupancy", "occupancy_type", "building_use", "use_type"),
+                        )
+                        or location_occupancy
                     ),
                     sprinklered=_boolean(
                         _first(
@@ -330,14 +771,17 @@ class LiveFederatoLoader:
                             ("sprinklered", "has_sprinklers", "sprinkler_status"),
                         )
                     ),
-                    protection_class=_first(
-                        building,
-                        ("protection_class", "public_protection_class", "ppc"),
+                    protection_class=_text(
+                        _first(
+                            building,
+                            ("protection_class", "public_protection_class", "ppc"),
+                        )
+                        or location_protection
                     ),
-                    flood_zone=_first(
+                    flood_zone=_text(_first(
                         building,
                         ("flood_zone", "fema_flood_zone", "flood_risk_zone"),
-                    ),
+                    )),
                     wildfire_score=_number(
                         _first(
                             building,
@@ -353,7 +797,12 @@ class LiveFederatoLoader:
                     loss_date=_date(
                         _first(claim, ("loss_date", "date_of_loss", "occurred_at"))
                     ),
-                    loss_value=_claim_total(claim),
+                    loss_value=_number(
+                        _first(
+                            claim,
+                            ("loss_value", "incurred_loss", "total_incurred", "amount"),
+                        )
+                    ),
                 )
                 for idx, claim in enumerate(claims)
             ]
@@ -377,16 +826,25 @@ class LiveFederatoLoader:
                     submission_type=_first(
                         item, ("submission_type", "business_type", "type")
                     )
-                    or _first(source, ("business_type", "submission_type")),
+                    or _first(source, ("business_type", "submission_type", "type")),
                     line_of_business=_first(
-                        source, ("line_of_business", "lob", "product_type")
-                    ),
-                    primary_state=str(state).upper() if state is not None else None,
-                    tiv=_number(
-                        _first(source, ("tiv", "total_insured_value", "total_tiv"))
+                        item, ("line_of_business", "lob", "product_type")
                     )
-                    or sum(building.tiv or 0 for building in building_models)
-                    or None,
+                    or _first(source, ("line_of_business", "lob", "product_type")),
+                    primary_state=str(state).upper() if state is not None else None,
+                    tiv=(
+                        policy_tiv
+                        if policy_tiv is not None
+                        else (
+                            sum(
+                                building.tiv
+                                for building in building_models
+                                if building.tiv is not None
+                            )
+                            if any(building.tiv is not None for building in building_models)
+                            else None
+                        )
+                    ),
                     premium=_number(
                         _first(source, ("premium", "total_premium", "written_premium"))
                     ),
@@ -396,6 +854,10 @@ class LiveFederatoLoader:
                     source_records={
                         resource: [identifier for record in items if (identifier := _identifier(record))]
                         for resource, items in graph.items()
+                    },
+                    expected_related_records={
+                        resource: sorted(identifiers)
+                        for resource, identifiers in expected.items()
                     },
                 )
             )

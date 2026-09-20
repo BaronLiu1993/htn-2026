@@ -5,7 +5,7 @@ import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Protocol
-from .evidence_search import EvidenceSearch
+from .evidence_search import EvidenceSearch, _headquarters_note, _is_headquarters_query
 from uuid import uuid4
 
 from openai import AsyncOpenAI
@@ -13,7 +13,9 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from .config import Settings
 from .adapters import DemoFederatoAdapter, FederatoAdapter
-from .guideline_registry import GuidelinePackage
+from .evidence_ledger import validate_binding
+from .federato_client import FederatoError
+from .guideline_registry import FactBinding, GuidelinePackage
 from .models import Assessment, EvidenceLedger, TraceEvent
 from .profile_registry import InvestigationProfile
 from .schema_registry import QueryValidationError, SchemaRegistry
@@ -97,6 +99,68 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
     },
     {
         "type": "function",
+        "name": "bind_facts",
+        "description": (
+            "Propose a schema-valid runtime binding from a canonical guideline fact to "
+            "discovered resources, fields, relationship paths, and one approved "
+            "deterministic operation. Bindings cannot change rule operators or thresholds."
+        ),
+        "strict": True,
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "bindings": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "fact_id": {"type": "string"},
+                            "resource": {"type": "string"},
+                            "operation": {
+                                "type": "string",
+                                "enum": [
+                                    "scalar",
+                                    "minimum",
+                                    "sum",
+                                    "weighted_match_share",
+                                    "rolling_sum",
+                                    "rolling_component_sum",
+                                ],
+                            },
+                            "path": {"type": "string"},
+                            "field": {"type": "string"},
+                            "fields": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                            "date_field": {"type": "string"},
+                            "collection": {"type": "string"},
+                            "relationship_path": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                            },
+                        },
+                        "required": [
+                            "fact_id",
+                            "resource",
+                            "operation",
+                            "path",
+                            "field",
+                            "fields",
+                            "date_field",
+                            "collection",
+                            "relationship_path",
+                        ],
+                        "additionalProperties": False,
+                    },
+                }
+            },
+            "required": ["bindings"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "type": "function",
         "name": "query_federato",
         "description": (
             "Execute one schema-valid Federato query for a stated evidence purpose. query_json "
@@ -111,8 +175,7 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
                 "purpose": {
                     "type": "string",
                     "description": (
-                        "One plain-English sentence for an underwriter. Name the evidence, the "
-                        "guideline criterion it supports, and why the check matters."
+                        "One short sentence for an underwriter. Name the evidence and why it matters."
                     ),
                 },
                 "query_json": {
@@ -134,17 +197,29 @@ TOOL_DEFINITIONS: list[dict[str, Any]] = [
 
 SYSTEM_INSTRUCTIONS = """You are UnderwriteIQ's evidence-planning underwriting agent.
 
-Your job is to resolve canonical facts before deterministic evaluation. You receive the selected guideline, investigation profile, current evidence ledger, live schema digest, and remaining budget. Inspect the runtime schema and guideline before querying. Every query must name the unresolved fact IDs it can resolve. Construct queries dynamically from schema results; never invent resources or fields.
+Resolve canonical guideline facts before deterministic evaluation. You receive the selected guideline, a compact live schema with identifier types, native candidate IDs, discovered relationship IDs, unresolved underwriting questions, pagination, and remaining budget.
 
-Every query purpose is shown directly to an underwriter. Write it as a short business explanation, for example: "Check five-year incurred losses because the guideline requires total losses below $100,000." Do not mention JSON, schemas, tool calls, canonical IDs, planning turns, or implementation details in that purpose.
+Work in this order:
+1. Inspect the runtime schema. Do not invent resources or fields. Identifier types are binding: if a field is number, $in and $eq values must be JSON numbers, not quoted strings.
+2. Bind each unresolved canonical fact to discovered resources, relationship paths, fields, and one approved deterministic operation. Bindings cannot change rule operators or thresholds.
+3. Write one Federato query for a named underwriting goal. Translate the goal into the documented pipeline. Do not reuse a canned Policy expand payload.
 
-Query syntax is exact: the expand stage is the reference tree itself; never add another "expand" wrapper inside that tree. Sort entries are {"field":"name","direction":"asc"}. Select only fields declared directly on the queried resource. Never use a dotted path through a reference such as "submission.id"; select the reference field itself or query the target resource directly. For broad queue evidence, prefer a direct query of a discovered resource with IDs in $in, then expand only references declared on that resource.
+Query language:
+- Pipeline: where (raw records) → expand → unwind → filter (hydrated rows) → over → select → sort → pagination.
+- Prefer expand when later filter or select must traverse a reference. Use select-leaf $expand when the hydrated object is only needed in the reply.
+- Use $elemMatch at array boundaries such as exposure_units, buildings, and claims. Never write a bare path like locations.state across an array.
+- Filter in-scope work with native IDs on the relationship field (for example Policy.submission), not stringified id unless that schema field is a string.
+- Do not invent Policy.tiv if the digest only exposes building TIV. Do not $sum in the query unless the ledger cannot compute it from source rows. The ledger computes aggregates from source observations.
+- Retain each resource's declared identifier and relationship fields on every returned record, including expanded records.
+- Paginate with limit 1..100. Retrieve the next page when a candidate query is full.
 
-The deterministic evaluator runs after evidence gathering and is authoritative. You cannot change rule outcomes. Preserve missing, conflicting, ambiguous, and unavailable facts. Do not claim external enrichment was performed unless a tool returned it.
+After each result, read search_note. If it reports zero rows, the next query must change: identifier types, where versus filter, expand, relationship field, or pagination. If rows return but total insured value, risk state, or insured name stay missing, expand the declared reference path instead of repeating the same select. Do not scan the complete source queue or unrelated business lines.
 
-Grounding is strict: for each explanation, evidence_ids must be a subset of that same submission's allowed_evidence_ids. Copy those IDs exactly. A related record ID returned by a query is not an allowed citation unless that exact ID also appears in allowed_evidence_ids. Tool results may inform the prose, but they do not expand the citation allowlist.
+Every query purpose is shown to an underwriter. Write one short sentence. Name the evidence and why it matters. Example: "Need the total insured value for the commercial property submissions." Do not mention JSON, schemas, tool calls, canonical IDs, planning turns, or implementation details.
 
-The initial message includes the live schema and complete selected guideline. You can inspect them again if useful. Query in batches across the selected in-scope candidates. Retain each queried resource's declared identifier and its direct relationship fields so evidence can be attributed; do not invent an id beneath an expanded reference. Do not aggregate or rename fields: the ledger computes the guideline aggregates from source observations. Retrieve the next page when a page is full. After each query, use the updated ledger coverage to choose the next useful search. Stop when all facts are verified, no useful search remains, or the remaining budget is zero. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Prefer a broad candidate query followed by a focused query only when the first result shows missing or contradictory evidence. Keep each query purpose concise. Do not draft submission decisions before the deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
+If a Policy search leaves in-scope submissions with no Policy, the next query must change path. Expand Submission.insured.hq.buildings for those ids. Name, risk state, and building TIV can exist with no Policy. Premium, business type, and claims cannot.
+
+The deterministic evaluator is authoritative. Preserve missing, conflicting, ambiguous, and unavailable facts. Do not claim external enrichment was performed unless a tool returned it. Grounding is strict: evidence_ids must be copied from that submission's allowed_evidence_ids. The final report summarizes the search; return explanations as an empty list because explanations are generated from final deterministic outcomes afterward. Stop when all facts are verified, no useful candidate search remains, or the remaining budget is zero. Do not draft submission decisions before deterministic evaluation. Do not reveal hidden chain-of-thought; provide only concise decision and query rationale summaries.
 """
 
 
@@ -185,6 +260,174 @@ def _ledger_input(ledger: EvidenceLedger) -> dict[str, Any]:
 
 def _guideline_payload(guideline: GuidelinePackage) -> dict[str, Any]:
     return guideline.model_dump(mode="json")
+
+
+def _resource_phrase(resource: str, count: int) -> str:
+    key = "".join(character for character in resource.lower() if character.isalnum())
+    names = {
+        "policy": ("policy", "policies"),
+        "submission": ("submission", "submissions"),
+        "building": ("building", "buildings"),
+        "claim": ("claim", "claims"),
+        "location": ("location", "locations"),
+        "insured": ("insured record", "insured records"),
+        "exposureunit": ("exposure unit", "exposure units"),
+    }
+    singular, plural = names.get(key, (f"{resource.lower()} record", f"{resource.lower()} records"))
+    return singular if count == 1 else plural
+
+
+def _search_note(
+    *,
+    query: dict[str, Any],
+    feedback: dict[str, Any],
+) -> str:
+    if _is_headquarters_query(query):
+        return _headquarters_note(feedback)
+    resource = str(query.get("resource") or "source")
+    records = int(feedback.get("records_found") or 0)
+    noun = _resource_phrase(resource, records if records else 2)
+    effect = str(feedback.get("query_effect") or "")
+    unresolved = [
+        item
+        for item in feedback.get("open_questions") or []
+        if int(item.get("unresolved_accounts") or 0) > 0
+    ]
+    resolved_labels = []
+    for item in feedback.get("newly_resolved_facts") or []:
+        fact_id = str(item.get("fact_id") or "")
+        if fact_id and fact_id not in resolved_labels:
+            resolved_labels.append(fact_id)
+    questions = {
+        str(fact.get("fact_id")): str(fact.get("question") or fact.get("fact_id"))
+        for item in feedback.get("submissions") or []
+        for fact in item.get("facts") or []
+    }
+    resolved_text = ", ".join(
+        questions.get(item, item).lower() for item in resolved_labels[:3]
+    )
+    no_policy = int(feedback.get("submissions_without_policy_count") or 0)
+    resource_key = "".join(
+        character for character in resource.lower() if character.isalnum()
+    )
+    if effect == "zero_rows" or records == 0:
+        return (
+            f"The search returned no {noun}. "
+            "The next search must use a different filter."
+        )
+    if effect == "unowned_rows":
+        return (
+            f"The search returned {records} {noun}. "
+            "These records do not belong to the selected submissions."
+        )
+    if effect == "unrelated_rows":
+        return (
+            f"The search returned {records} {noun} for other business. "
+            "The next search must use the in-scope submissions."
+        )
+    if no_policy and resource_key == "policy":
+        return (
+            f"The search returned {records} {noun}. "
+            f"{no_policy} submissions have no Policy."
+        )
+    missing = ""
+    if unresolved:
+        top = unresolved[0]
+        missing = (
+            f"{int(top['unresolved_accounts'])} submissions still have no "
+            f"{str(top['question']).lower()}."
+        )
+    if effect in {"repeated_rows", "no_fact_change"}:
+        opener = (
+            f"The search returned {records} {noun} already on file."
+            if effect == "repeated_rows"
+            else f"The search returned {records} {noun}."
+        )
+        return f"{opener} {missing or 'No new facts were confirmed.'}".strip()
+    accounts = int(feedback.get("affected_submissions") or 0)
+    if resolved_text:
+        verb = "is" if len(resolved_labels) == 1 else "are"
+        counted = f"{accounts} submission" if accounts == 1 else f"{accounts} submissions"
+        return (
+            f"The search returned {records} {noun}. "
+            f"{resolved_text} {verb} now on {counted}."
+        )
+    if missing:
+        return f"The search returned {records} {noun}. {missing}"
+    return f"The search returned {records} {noun}. Underwriting facts are now on file."
+
+
+def _apply_fact_bindings(
+    *,
+    arguments: dict[str, Any],
+    search: EvidenceSearch,
+    registry: SchemaRegistry,
+    guideline: GuidelinePackage,
+    trace: list[TraceEvent],
+) -> dict[str, Any]:
+    proposed: list[FactBinding] = []
+    rejected: list[str] = []
+    for item in arguments.get("bindings") or []:
+        if not isinstance(item, dict):
+            continue
+        payload = {
+            key: (None if value == "" else value)
+            for key, value in item.items()
+        }
+        fields = [str(field) for field in payload.get("fields") or [] if field]
+        try:
+            proposed.append(
+                FactBinding(
+                    fact_id=str(payload.get("fact_id") or ""),
+                    resource=str(payload.get("resource") or ""),
+                    operation=str(payload.get("operation") or "scalar"),
+                    path=payload.get("path"),
+                    collection=payload.get("collection"),
+                    field=payload.get("field"),
+                    fields=fields,
+                    date_field=payload.get("date_field"),
+                    relationship_path=[
+                        str(path)
+                        for path in payload.get("relationship_path") or []
+                        if path
+                    ],
+                )
+            )
+        except Exception as exc:
+            rejected.append(str(exc))
+    rebound = search.rebind(proposed)
+    bound = rebound["bound_fact_ids"]
+    unbound = rebound["unbound_fact_ids"]
+    validated = [
+        validate_binding(item, guideline, registry)
+        for item in proposed
+    ]
+    rejected.extend(
+        item.reason or item.fact_id
+        for item in validated
+        if item.status != "bound"
+    )
+    trace.append(
+        TraceEvent(
+            id=f"trace_{uuid4().hex[:10]}",
+            tool="bind_facts",
+            purpose="Link each guideline question to a source field.",
+            status="success" if bound else "failure",
+            started_at=datetime.now(),
+            duration_ms=1,
+            fact_ids=bound,
+            result_summary=(
+                f"The system linked {len(bound)} guideline questions to source fields."
+                + (
+                    f" {len(unbound)} questions have no source field."
+                    if unbound
+                    else ""
+                )
+            ),
+            error="; ".join(rejected) if rejected else None,
+        )
+    )
+    return {"ok": True, **rebound, "rejected": rejected}
 
 
 def _output_text(response: dict[str, Any]) -> str:
@@ -235,6 +478,8 @@ class AgentRunResult:
     model: str
     tool_calls: int
     query_results: list[dict[str, Any]] = field(default_factory=list)
+    stop_reason: str = "no_useful_search"
+    unresolved_facts_by_reason: dict[str, int] = field(default_factory=dict)
     model_latency_ms: int = 0
     prompt_tokens: int = 0
     completion_tokens: int = 0
@@ -276,11 +521,14 @@ class UnderwritingAgent:
             if assessments is not None
             else [_ledger_input(item) for item in ledgers or []]
         )
+        coverage = search.coverage()
         prompt = {
             "goal": (
-                "Resolve useful evidence gaps before deterministic evaluation. Summarize the search."
+                "Resolve useful evidence gaps before deterministic evaluation. "
+                "Inspect the live schema, bind facts, then write one query for a named underwriting goal."
             ),
             "schema": registry.compact_digest(),
+            "identifier_types": registry.identifier_types(),
             "selected_guideline": _guideline_payload(guideline),
             "mode": mode,
             "guideline": {
@@ -290,6 +538,32 @@ class UnderwritingAgent:
             "reference_library": [profile.model_dump(mode="json")] if profile else [],
             "remaining_tool_budget": gateway.budget_remaining,
             "submission_count": len(inputs),
+            "candidate_submission_ids": search.candidate_query_ids,
+            "candidate_display_ids": sorted(search.candidate_ids),
+            "relationship_ids": coverage["relationship_ids"],
+            "open_questions": coverage.get("open_questions", []),
+            "submissions_without_policy": coverage.get("submissions_without_policy", []),
+            "unresolved_facts_by_submission": coverage["submissions"],
+            "unresolved_facts_by_reason": coverage["unresolved_by_reason"],
+            "pagination_state": coverage["pagination_state"],
+            "fact_bindings": [
+                search.mapper.bindings[fact.id].model_dump(mode="json")
+                if fact.id in search.mapper.bindings
+                else {
+                    "fact_id": fact.id,
+                    "status": "unbound",
+                    "hint": fact.source.model_dump(mode="json"),
+                }
+                for fact in guideline.required_facts
+            ],
+            "approved_binding_operations": [
+                "scalar",
+                "minimum",
+                "sum",
+                "weighted_match_share",
+                "rolling_sum",
+                "rolling_component_sum",
+            ],
             "submissions": inputs,
         }
         input_items: list[dict[str, Any]] = [
@@ -303,19 +577,30 @@ class UnderwritingAgent:
         total_tool_calls = 0
         query_results: list[dict[str, Any]] = []
         response_schema = AgentReport.model_json_schema()
+        stop_reason = "no_useful_search"
         model_latency_ms = 0
         prompt_tokens = 0
         completion_tokens = 0
 
         for turn in range(self.settings.openai_max_turns):
             guideline_called = "get_guideline" in called_tools
+            current_coverage = search.coverage()
+            if current_coverage["unresolved_fact_count"] == 0:
+                stop_reason = "all_facts_resolved"
+            elif query_calls >= self.settings.openai_max_query_calls:
+                stop_reason = "query_budget_exhausted"
+            elif gateway.budget_remaining == 0:
+                stop_reason = "tool_budget_exhausted"
+            elif turn == self.settings.openai_max_turns - 1:
+                stop_reason = "turn_limit_reached"
             force_report = (
                 turn == self.settings.openai_max_turns - 1
                 or query_calls >= self.settings.openai_max_query_calls
                 or gateway.budget_remaining == 0
-                or search.coverage()["unresolved_fact_count"] == 0
+                or current_coverage["unresolved_fact_count"] == 0
             )
             if force_report:
+                await search.fill_headquarters(gateway)
                 input_items.append(
                     {
                         "role": "user",
@@ -356,15 +641,14 @@ class UnderwritingAgent:
                 TraceEvent(
                     id=f"trace_{uuid4().hex[:10]}",
                     tool="openai_agent",
-                    purpose="Decide which underwriting evidence to check next",
+                    purpose="Choose the next evidence search.",
                     status="success",
                     started_at=datetime.now(),
                     duration_ms=elapsed_ms,
                     result_summary=(
-                        "The agent identified another evidence check that could resolve a "
-                        "guideline question"
+                        "The next search can confirm a guideline fact."
                         if calls
-                        else "The agent completed its evidence review and prepared submission explanations"
+                        else "Evidence search is complete."
                     ),
                 )
             )
@@ -373,6 +657,14 @@ class UnderwritingAgent:
                 missing_tools = {"inspect_schema", "query_federato"} - called_tools
                 if not guideline_called:
                     missing_tools.add("get_guideline")
+                if any(
+                    binding.status != "bound"
+                    for binding in search.mapper.bindings.values()
+                ) or any(
+                    fact.id not in search.mapper.bindings
+                    for fact in selected_guideline.required_facts
+                ):
+                    missing_tools.add("bind_facts")
                 if missing_tools and not force_report and turn + 1 < self.settings.openai_max_turns:
                     input_items.append(
                         {
@@ -384,6 +676,7 @@ class UnderwritingAgent:
                         }
                     )
                     continue
+                await search.fill_headquarters(gateway)
                 text = _output_text(response)
                 if not text:
                     raise RuntimeError("OpenAI returned no structured agent report.")
@@ -393,6 +686,10 @@ class UnderwritingAgent:
                     model=str(response.get("model") or self.settings.openai_model),
                     tool_calls=total_tool_calls,
                     query_results=query_results,
+                    stop_reason=stop_reason,
+                    unresolved_facts_by_reason=search.coverage()[
+                        "unresolved_by_reason"
+                    ],
                     model_latency_ms=model_latency_ms,
                     prompt_tokens=prompt_tokens,
                     completion_tokens=completion_tokens,
@@ -409,9 +706,26 @@ class UnderwritingAgent:
                     result: Any = {"ok": False, "error": f"Invalid tool arguments: {exc}"}
                 else:
                     if name == "inspect_schema":
-                        result = {"ok": True, **registry.compact_digest()}
+                        result = {
+                            "ok": True,
+                            **registry.compact_digest(),
+                            "fact_bindings": [
+                                search.mapper.bindings[fact.id].model_dump(mode="json")
+                                if fact.id in search.mapper.bindings
+                                else {"fact_id": fact.id, "status": "unbound"}
+                                for fact in selected_guideline.required_facts
+                            ],
+                        }
                     elif name == "get_guideline":
                         result = {"ok": True, "guideline": _guideline_payload(selected_guideline)}
+                    elif name == "bind_facts":
+                        result = _apply_fact_bindings(
+                            arguments=arguments,
+                            search=search,
+                            registry=registry,
+                            guideline=selected_guideline,
+                            trace=trace,
+                        )
                     elif name == "query_federato":
                         query_calls += 1
                         result = await self._query_tool(
@@ -424,12 +738,29 @@ class UnderwritingAgent:
                         if result.get("ok"):
                             query_results.append(result)
                             feedback = search.apply(result)
-                            result = {"ok": True, "query": result["query"], **feedback,
-                                      "remaining_query_budget": min(gateway.budget_remaining, self.settings.openai_max_query_calls - query_calls)}
-                            trace[-1].result_summary = (
-                                f"Found {feedback['records_found']} related records. "
-                                f"Updated {feedback['useful_fact_changes']} underwriting answers."
+                            gateway.annotate_query(
+                                result.get("audit_id"),
+                                {
+                                    key: value
+                                    for key, value in feedback.items()
+                                    if key
+                                    not in {
+                                        "submissions",
+                                        "relationship_ids",
+                                        "pagination_state",
+                                        "unresolved_by_reason",
+                                    }
+                                },
                             )
+                            result = {"ok": True, "query": result["query"], **feedback,
+                                      "search_note": _search_note(query=result["query"], feedback=feedback),
+                                      "remaining_query_budget": min(gateway.budget_remaining, self.settings.openai_max_query_calls - query_calls)}
+                            summary = result["search_note"]
+                            trace[-1].result_summary = summary
+                            trace[-1].records_inspected = int(feedback["records_found"])
+                            trace[-1].facts_changed = int(feedback["useful_fact_changes"])
+                            trace[-1].source_resource = str(result["query"].get("resource") or "")
+                            trace[-1].fact_ids = [str(item) for item in (result.get("fact_ids") or arguments.get("fact_ids") or [])]
                     else:
                         result = {"ok": False, "error": f'Unknown tool "{name}".'}
                 input_items.append(
@@ -450,7 +781,7 @@ class UnderwritingAgent:
         trace: list[TraceEvent],
         query_calls: int,
     ) -> dict[str, Any]:
-        purpose = str(arguments.get("purpose") or "Inspect underwriting evidence")[:240]
+        purpose = str(arguments.get("purpose") or "Need underwriting evidence.")[:240]
         fact_ids = [str(item) for item in arguments.get("fact_ids", [])][:40]
         started = time.perf_counter()
         if query_calls > self.settings.openai_max_query_calls:
@@ -463,37 +794,44 @@ class UnderwritingAgent:
             if not isinstance(query, dict):
                 raise QueryValidationError("Query must decode to a JSON object.")
             query.setdefault("pagination", {"limit": 100, "offset": 0})
-            registry.validate_query(query)
+            query = registry.coerce_query(query)
             result = await gateway.query(query, purpose=purpose, fact_ids=fact_ids)
             return {
                 "ok": True,
                 "query": query,
                 "fact_ids": fact_ids,
                 "result": result,
+                "audit_id": gateway.last_query_audit_id,
             }
-        except (json.JSONDecodeError, QueryValidationError) as exc:
+        except (json.JSONDecodeError, QueryValidationError, FederatoError) as exc:
+            message = str(exc)
+            repairable = not isinstance(exc, FederatoError) or any(
+                token in message
+                for token in (
+                    "VALIDATION_ERROR",
+                    "Unknown field",
+                    "Invalid",
+                    "NOT_FOUND",
+                    "Unknown resource",
+                )
+            )
+            if isinstance(exc, FederatoError) and not repairable:
+                raise
             trace.append(
                 TraceEvent(
                     id=f"trace_{uuid4().hex[:10]}",
                     tool="query_guidance",
-                    purpose="Refine an evidence search that did not match the available data",
+                    purpose="Revise a search that did not match the source.",
                     status="failure",
                     started_at=datetime.now(),
                     duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
-                    result_summary="The proposed search used unavailable fields, so the agent must revise it.",
+                    result_summary="The search did not match the available fields. The next search must use a different path.",
                     fact_ids=fact_ids,
-                    adapter="federato",
                     budget_remaining=gateway.budget_remaining,
-                    error=str(exc),
+                    error=message,
                 )
             )
-            return {"ok": False, "error": str(exc), "repairable": True}
-        except Exception as exc:
-            return {
-                "ok": False,
-                "error": f"Federato query failed: {str(exc)[:500]}",
-                "repairable": True,
-            }
+            return {"ok": False, "error": message, "repairable": True}
 
 
 def apply_agent_report(

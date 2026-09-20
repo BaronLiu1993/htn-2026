@@ -1,0 +1,66 @@
+{
+  "id": "guideline-c-small-clean",
+  "name": "Small clean-risk property — sample",
+  "version": "2025.1",
+  "effective_from": "2025-01-01",
+  "effective_to": null,
+  "source": "Sample small clean-risk commercial property appetite for the mock queue",
+  "scope": {
+    "fact": "line_of_business",
+    "operator": "contains_normalized",
+    "value": "property",
+    "description": "Commercial property submissions",
+    "source": {
+      "resource": "Submission",
+      "field": "line_of_business",
+      "required": true
+    }
+  },
+  "required_facts": [
+    {"id": "submission_type", "label": "Submission type", "source": {"resource": "Submission", "path": "submission_type"}},
+    {"id": "line_of_business", "label": "Line of business", "source": {"resource": "Submission", "path": "line_of_business"}},
+    {"id": "primary_state", "label": "Primary risk state", "source": {"resource": "Location", "path": "primary_state", "field": "state"}},
+    {"id": "tiv", "label": "Total insured value", "source": {"resource": "Policy", "path": "tiv"}},
+    {"id": "premium", "label": "Total premium", "source": {"resource": "Policy", "path": "premium"}},
+    {"id": "oldest_building_year", "label": "Oldest building year", "source": {"resource": "Building", "collection": "buildings", "field": "year_built", "operation": "minimum", "require_all": true}},
+    {"id": "acceptable_construction_share", "label": "Acceptable construction share", "source": {"resource": "Building", "collection": "buildings", "field": "construction_type", "operation": "weighted_match_share", "weight_field": "tiv", "match_values": ["fire resistive", "modified fire resistive", "steel frame", "steel", "joisted masonry", "masonry non combustible", "masonry noncombustible", "non combustible", "noncombustible"], "require_all": true}, "display": "percent"},
+    {"id": "five_year_loss_total", "label": "Five-year loss total", "source": {"resource": "Claim", "collection": "claims", "date_field": "loss_date", "field": "loss_value", "operation": "rolling_sum", "window_years": 5, "require_all": true}}
+  ],
+  "sufficiency": {"required_rule_kinds": ["requirement"], "unresolved_behavior": "needs_review"},
+  "requirements": [
+    {"id": "R1", "name": "New business", "fact": "submission_type", "operator": "in_normalized", "value": ["new", "new business", "newbusiness"], "expected": "New business; renewal is not acceptable", "missing_note": "Submission type is missing."},
+    {"id": "R2", "name": "Property line of business", "fact": "line_of_business", "operator": "contains_normalized", "value": "property", "expected": "Property", "missing_note": "Line of business is missing."},
+    {"id": "R3", "name": "TIV at or below $90M", "fact": "tiv", "operator": "lte", "value": 90000000, "expected": "At most $90M", "missing_note": "Total insured value is missing."},
+    {"id": "R4", "name": "Premium in acceptable range", "fact": "premium", "operator": "between", "value": [40000, 400000], "expected": "$40K-$400K inclusive", "missing_note": "Premium is missing."},
+    {"id": "R5", "name": "Buildings from 1960 or later", "fact": "oldest_building_year", "operator": "gte", "value": 1960, "expected": "Every relevant building from 1960 or later", "missing_note": "One or more building years are missing.", "note": "Oldest relevant building controls."},
+    {"id": "R6", "name": "Non-frame construction share", "fact": "acceptable_construction_share", "operator": "gte", "value": 0.4, "expected": "At least 40% fire resistive, modified fire resistive, steel frame, joisted masonry, masonry non-combustible, or non-combustible", "missing_note": "One or more construction types are missing."},
+    {"id": "R7", "name": "Five-year incurred losses below $500K", "fact": "five_year_loss_total", "operator": "lt", "value": 500000, "expected": "Aggregate applicable incurred losses under $500K", "missing_note": "One or more claims lack a loss date or incurred-loss components."}
+  ],
+  "preferences": [
+    {"id": "P1", "name": "Smaller TIV", "fact": "tiv", "operator": "lte", "value": 60000000, "expected": "At most $60M"},
+    {"id": "P2", "name": "Lower premium", "fact": "premium", "operator": "lte", "value": 300000, "expected": "At most $300K"},
+    {"id": "P3", "name": "Buildings from 1970 or later", "fact": "oldest_building_year", "operator": "gte", "value": 1970, "expected": "Every relevant building from 1970 or later", "note": "Oldest relevant building controls."},
+    {"id": "P4", "name": "Stronger non-frame construction share", "fact": "acceptable_construction_share", "operator": "gte", "value": 0.6, "expected": "At least 60% favorable construction"},
+    {"id": "P5", "name": "Cleaner five-year loss history", "fact": "five_year_loss_total", "operator": "lt", "value": 250000, "expected": "Aggregate applicable incurred losses under $250K"}
+  ],
+  "ranking": {
+    "status_order": ["target", "acceptable", "needs_review", "out_of_appetite"],
+    "tie_breakers": [
+      {"field": "target_matches", "direction": "desc"},
+      {"field": "evidence_completeness", "direction": "desc"},
+      {"field": "received_date", "direction": "asc"},
+      {"field": "submission_id", "direction": "asc"}
+    ]
+  },
+  "investigation_profile_id": "property-cope",
+  "tool_policy": {
+    "allowed_tool_classes": ["federato"],
+    "required_adapters": ["federato"],
+    "optional_adapter_failure": "unavailable",
+    "max_calls": 40,
+    "timeout_seconds": 20
+  },
+  "source_plan": {
+    "resources": ["Submission", "Policy", "Insured", "Claim", "ExposureUnit", "Location", "Building"]
+  }
+}

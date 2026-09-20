@@ -13,6 +13,8 @@ DEMO_SCHEMA: dict[str, Any] = {
             "id": {"type": "string"},
             "submission_number": {"type": "string"},
             "received_date": {"type": "string"},
+            "submission_type": {"type": "string"},
+            "line_of_business": {"type": "string", "required": True},
             "policy": {
                 "type": "reference",
                 "resource": "Policy",
@@ -29,6 +31,11 @@ DEMO_SCHEMA: dict[str, Any] = {
         "type": "object",
         "fields": {
             "id": {"type": "string"},
+            "submission": {
+                "type": "reference",
+                "resource": "Submission",
+                "cardinality": "one",
+            },
             "submission_type": {"type": "string"},
             "line_of_business": {"type": "string"},
             "premium": {"type": "number"},
@@ -44,6 +51,11 @@ DEMO_SCHEMA: dict[str, Any] = {
             "claims": {
                 "type": "reference",
                 "resource": "Claim",
+                "cardinality": "many",
+            },
+            "locations": {
+                "type": "reference",
+                "resource": "Location",
                 "cardinality": "many",
             },
         },
@@ -113,6 +125,8 @@ def demo_records() -> dict[str, list[dict[str, Any]]]:
                 "id": submission.id,
                 "submission_number": submission.submission_number,
                 "received_date": _iso(submission.received_date),
+                "submission_type": submission.submission_type,
+                "line_of_business": submission.line_of_business,
                 "policy": submission.id,
                 "insured": submission.id,
             }
@@ -120,6 +134,7 @@ def demo_records() -> dict[str, list[dict[str, Any]]]:
         records["Policy"].append(
             {
                 "id": submission.id,
+                "submission": submission.id,
                 "submission_type": submission.submission_type,
                 "line_of_business": submission.line_of_business,
                 "premium": submission.premium,
@@ -129,6 +144,7 @@ def demo_records() -> dict[str, list[dict[str, Any]]]:
                 "expiration_date": _iso(submission.expiration_date),
                 "buildings": building_ids,
                 "claims": claim_ids,
+                "locations": [submission.id],
             }
         )
         records["Insured"].append(

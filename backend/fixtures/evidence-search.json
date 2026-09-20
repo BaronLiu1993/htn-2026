@@ -5,7 +5,8 @@
     "expand": {
       "insured": true,
       "policy": {
-        "buildings": true
+        "buildings": true,
+        "locations": true
       }
     },
     "pagination": {

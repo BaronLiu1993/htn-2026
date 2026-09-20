@@ -26,11 +26,24 @@ class GuidelineRule(BaseModel):
     note: str | None = None
 
 
+class ScopeSource(BaseModel):
+    resource: str
+    field: str
+    required: bool = False
+
+
 class ScopePredicate(BaseModel):
     fact: str
     operator: Operator
     value: Any
     description: str
+    source: ScopeSource
+
+
+FactOperation = Literal[
+    "scalar", "minimum", "sum", "weighted_match_share", "rolling_sum",
+    "rolling_component_sum",
+]
 
 
 class FactSource(BaseModel):
@@ -38,22 +51,70 @@ class FactSource(BaseModel):
     path: str | None = None
     collection: str | None = None
     field: str | None = None
+    fields: list[str] = Field(default_factory=list)
     date_field: str | None = None
-    operation: Literal["scalar", "minimum", "weighted_match_share", "rolling_sum"] = "scalar"
+    operation: FactOperation = "scalar"
     weight_field: str | None = None
     match_values: list[str] = Field(default_factory=list)
     window_years: int | None = None
     require_all: bool = False
+    relationship_path: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def validate_shape(self) -> "FactSource":
-        if self.operation == "scalar" and not self.path:
+        if self.operation == "scalar" and not (self.path or self.field):
             raise ValueError("Scalar facts require a source path.")
-        if self.operation != "scalar" and not (self.collection and self.field):
+        if self.operation in {"minimum", "sum", "weighted_match_share"} and not (
+            self.collection and self.field
+        ):
             raise ValueError("Aggregate facts require a collection and field.")
-        if self.operation == "rolling_sum" and not (self.date_field and self.window_years):
-            raise ValueError("Rolling sums require date_field and window_years.")
+        if self.operation == "rolling_sum" and not (
+            self.collection and self.field and self.date_field and self.window_years
+        ):
+            raise ValueError("Rolling sums require a collection, field, date_field, and window_years.")
+        if self.operation == "rolling_component_sum" and not (
+            self.collection and self.fields and self.date_field and self.window_years
+        ):
+            raise ValueError(
+                "Rolling component sums require a collection, fields, date_field, and window_years."
+            )
         return self
+
+
+class FactBinding(BaseModel):
+    fact_id: str
+    resource: str
+    operation: FactOperation
+    status: Literal["bound", "unbound"] = "bound"
+    path: str | None = None
+    collection: str | None = None
+    field: str | None = None
+    fields: list[str] = Field(default_factory=list)
+    date_field: str | None = None
+    weight_field: str | None = None
+    match_values: list[str] = Field(default_factory=list)
+    window_years: int | None = None
+    require_all: bool = False
+    relationship_path: list[str] = Field(default_factory=list)
+    reason: str | None = None
+
+    def to_source(self) -> FactSource:
+        if self.status != "bound":
+            raise ValueError(f'Fact "{self.fact_id}" is not bound.')
+        return FactSource(
+            resource=self.resource,
+            path=self.path,
+            collection=self.collection,
+            field=self.field,
+            fields=self.fields,
+            date_field=self.date_field,
+            operation=self.operation,
+            weight_field=self.weight_field,
+            match_values=self.match_values,
+            window_years=self.window_years,
+            require_all=self.require_all,
+            relationship_path=self.relationship_path,
+        )
 
 
 class RequiredFact(BaseModel):
@@ -128,6 +189,14 @@ class GuidelinePackage(BaseModel):
         missing = sorted(referenced - known)
         if missing:
             raise ValueError(f"Rules reference unknown facts: {', '.join(missing)}.")
+        scope_fact = next(fact for fact in self.required_facts if fact.id == self.scope.fact)
+        if (
+            scope_fact.source.resource != self.scope.source.resource
+            or (scope_fact.source.field or scope_fact.source.path) != self.scope.source.field
+        ):
+            raise ValueError(
+                "The scope source must match the declared source of the scope fact."
+            )
         if len(self.ranking.status_order) != len(set(self.ranking.status_order)):
             raise ValueError("Ranking status order values must be unique.")
         if self.effective_to and self.effective_to < self.effective_from:
@@ -213,6 +282,12 @@ class GuidelineRegistry:
             target = package_id or "an installed guideline"
             suffix = f" version {version}" if version else ""
             raise LookupError(f"No effective {target}{suffix} was found.")
+        if package_id is None and version is None:
+            default = next(
+                (item for item in candidates if item.id == DEFAULT_GUIDELINE.id),
+                candidates[0],
+            )
+            return default
         if len(candidates) != 1:
             rendered = ", ".join(f"{item.id}@{item.version}" for item in candidates)
             raise LookupError(f"Guideline selection is ambiguous: {rendered}.")

@@ -10,3 +10,4 @@ backend/.venv/
 frontend/.next/
 frontend/node_modules/
 .playwright-cli
+artifacts/

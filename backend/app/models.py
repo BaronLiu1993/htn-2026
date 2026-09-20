@@ -51,6 +51,7 @@ class SubmissionEvidence(BaseModel):
     conflicts: list[str] = Field(default_factory=list)
     raw_records: dict[str, list[dict[str, Any]]] = Field(default_factory=dict)
     source_records: dict[str, list[str]] = Field(default_factory=dict)
+    expected_related_records: dict[str, list[str]] = Field(default_factory=dict)
 
 
 class EvidenceItem(BaseModel):
@@ -131,6 +132,26 @@ class TraceEvent(BaseModel):
     budget_remaining: int | None = None
     result_summary: str
     error: str | None = None
+    records_inspected: int | None = None
+    facts_changed: int | None = None
+    page_count: int | None = None
+    source_resource: str | None = None
+
+
+class QueryAudit(BaseModel):
+    id: str
+    payload: dict[str, Any]
+    schema_digest: str
+    resource: str
+    pagination: dict[str, int] = Field(default_factory=dict)
+    started_at: datetime
+    duration_ms: int
+    returned_count: int = 0
+    returned_total: int | None = None
+    status: Literal["success", "failure"]
+    failed_field_path: str | None = None
+    error: str | None = None
+    attribution: dict[str, Any] = Field(default_factory=dict)
 
 
 class Assessment(BaseModel):
@@ -173,7 +194,7 @@ class QueueSubmission(BaseModel):
     tiv: float | None = None
     primary_state: str | None = None
     line_of_business: str | None = None
-    scope_status: Literal["applicable", "not_applicable", "not_evaluated"] = "not_evaluated"
+    scope_status: Literal["in_scope", "outside_scope", "scope_unknown", "not_evaluated"] = "not_evaluated"
     analysis_status: Literal["not_analyzed"] = "not_analyzed"
 
 
@@ -199,20 +220,27 @@ class AnalysisRun(BaseModel):
     guideline_version: str
     guideline_effective_date: date
     profile_id: str | None = None
+    available_submissions: int = 0
+    in_scope_submissions: int = 0
+    outside_scope_submissions: int = 0
+    scope_unknown_submissions: int = 0
+    assessed_submissions: int = 0
     total_submissions: int = 0
     applicable_submissions: int = 0
     not_applicable_submissions: int = 0
-    scope_unknown_submissions: int = 0
     duration_ms: int = 0
     tool_call_count: int = 0
     unresolved_fact_count: int = 0
     useful_fact_changes: int = 0
     query_count: int = 0
+    query_metrics: dict[str, int] = Field(default_factory=dict)
     activity: list[TraceEvent] = Field(default_factory=list)
     agent_mode: AgentMode = "openai_required"
     agent_model: str | None = None
     agent_summary: str | None = None
     agent_adaptations: list[str] = Field(default_factory=list)
+    agent_stop_reason: str | None = None
+    unresolved_facts_by_reason: dict[str, int] = Field(default_factory=dict)
     model_latency_ms: int = 0
     model_prompt_tokens: int = 0
     model_completion_tokens: int = 0

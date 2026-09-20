@@ -37,10 +37,53 @@ def _conflict_outcome(submission: SubmissionEvidence) -> RuleOutcome:
     )
 
 
+def _building_domain_evidence(
+    submission: SubmissionEvidence | None,
+    domain_id: str,
+) -> list[EvidenceItem]:
+    if submission is None:
+        return []
+    items: list[EvidenceItem] = []
+    for building in submission.buildings:
+        if domain_id == "occupancy" and building.occupancy:
+            items.append(
+                EvidenceItem(
+                    resource="Building",
+                    record_id=building.id,
+                    field="occupancy",
+                    value=building.occupancy,
+                    label="Occupancy",
+                )
+            )
+        if domain_id == "protection":
+            if building.protection_class:
+                items.append(
+                    EvidenceItem(
+                        resource="Building",
+                        record_id=building.id,
+                        field="protection_class",
+                        value=building.protection_class,
+                        label="Protection class",
+                    )
+                )
+            if building.sprinklered is not None:
+                items.append(
+                    EvidenceItem(
+                        resource="Building",
+                        record_id=building.id,
+                        field="sprinklered",
+                        value=building.sprinklered,
+                        label="Sprinklered",
+                    )
+                )
+    return items
+
+
 def build_profile_considerations(
     ledger: EvidenceLedger,
     package: GuidelinePackage,
     profile: InvestigationProfile | None,
+    submission: SubmissionEvidence | None = None,
 ) -> list[UnderwritingConsideration]:
     if profile is None:
         return []
@@ -50,12 +93,18 @@ def build_profile_considerations(
         facts = [ledger.fact(fact_id) for fact_id in domain.fact_ids]
         facts = [fact for fact in facts if fact is not None]
         evidence = [item for fact in facts for item in evidence_items(fact)]
+        if not evidence:
+            evidence = _building_domain_evidence(submission, domain.id)
         if facts and all(fact.state == "verified" for fact in facts):
             status = "available"
             summary = f"{domain.label} evidence is available for underwriting review."
         elif evidence:
-            status = "partial"
-            summary = f"{domain.label} evidence is incomplete."
+            status = "partial" if facts else "available"
+            summary = (
+                f"{domain.label} evidence is incomplete."
+                if facts
+                else f"{domain.label} evidence is available for underwriting review."
+            )
         else:
             status = "missing"
             summary = f"{domain.label} evidence is not available from the current source plan."
@@ -160,7 +209,9 @@ def evaluate_ledger(
     }[status]
     explanation = f"{match_text}. {'; '.join(details)}. {action}."
 
-    considerations = build_profile_considerations(ledger, package, profile)
+    considerations = build_profile_considerations(
+        ledger, package, profile, submission
+    )
     return Assessment(
         submission_id=submission.id,
         submission_number=submission.submission_number,

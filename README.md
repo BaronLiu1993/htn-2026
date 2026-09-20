@@ -19,9 +19,10 @@ UnderwriteIQ does not approve, price, quote, or bind insurance coverage.
 - COPE evidence coverage that separates informational factors from carrier decision rules.
 - A central tool gateway that validates schema, budgets, timeouts, adapter policy, and trace events.
 - OpenAI Responses API agent with strict schema, guideline, and Federato query tools before evaluation.
-- Selectable UnderwriteIQ Qwen3-8B specialist served by Baseten with strict JSON validation.
-- Per-run model latency, token usage, JSON validity, and specialist/rule-engine agreement telemetry.
+- An optional Baseten UnderwriteIQ model selector for specialist classification after deterministic evaluation.
 - Dynamic schema-grounded query construction with bounded repair and visible OpenAI failures.
+- Package-declared scope selection before detailed retrieval, with separate available, in-scope, outside-scope, scope-unknown, and assessed counts.
+- Credential-free per-query audits with schema digests, pagination, attribution, usefulness, and failure paths.
 - Evidence-grounded AI explanations that cannot override appetite outcomes.
 - Stable queue ranking, evidence-backed explanations, and auditable tool traces.
 - Responsive Next.js guideline library, explicit run selector, queue, generic ledger, and activity views.
@@ -36,9 +37,7 @@ flowchart LR
     UI --> API[FastAPI]
     API --> O[Analysis service]
     O --> G[Guideline and profile registries]
-    O --> A[Selected model provider]
-    A --> OA[OpenAI evidence-planning agent]
-    A --> B[UnderwriteIQ Qwen3-8B on Baseten]
+    O --> A[OpenAI evidence-planning agent]
     O --> S[Schema registry]
     O --> Q[Budgeted tool gateway]
     O --> E[Deterministic evaluator]
@@ -52,7 +51,7 @@ flowchart LR
     R --> UI
 ```
 
-OpenAI performs bounded evidence planning. The UnderwriteIQ model classifies normalized appetite evidence. The selected model cannot override verified rule outcomes.
+OpenAI performs bounded evidence planning and explanation. It cannot override verified rule outcomes.
 
 ## Run locally
 
@@ -114,18 +113,6 @@ The model must inspect schema and guideline, name the unresolved fact IDs for ea
 
 The complete design and challenge acceptance matrix are in [AGENT_PLAN.md](AGENT_PLAN.md).
 
-## UnderwriteIQ model on Baseten
-
-Install and authenticate the Baseten CLI on the backend machine, then set the deployed model ID if it differs from the default in `.env.example`. No Baseten credential is sent to the browser.
-
-```bash
-baseten login
-export BASETEN_MODEL_ID="woz1kxn3"
-python3 -m uvicorn backend.main:app --reload --port 8000
-```
-
-The queue's **Model** selector switches between `OpenAI · evidence agent` and `UnderwriteIQ · Qwen3-8B`. For the specialist path, the backend retrieves the guideline-declared Federato resources, builds the same evidence ledger used by the rule engine, sends only normalized policy/appetite facts to Baseten, validates the returned JSON, and reports agreement. The deterministic engine always owns the final four-state queue result, including hard-exclusion precedence.
-
 ## Appetite logic
 
 The 2025 property rules require new property business in an eligible state, TIV at or below $150M, premium from $50K-$175K, buildings newer than 1990, a majority of acceptable construction, and aggregate applicable five-year losses below $100K.
@@ -154,7 +141,6 @@ Omit `submission_ids` or send `null` to analyze the full queue:
 {
   "guideline_id": "guideline-a",
   "guideline_version": "2025.1",
-  "model_provider": "baseten",
   "submission_ids": ["101", "102"],
   "force_schema_refresh": false
 }
@@ -175,10 +161,7 @@ Run the credentialed acceptance gate from the repository root:
 ./.venv/bin/python scripts/run_guideline_acceptance.py
 ```
 
-The gate requires live Federato and OpenAI credentials. It independently discovers the
-guideline's in-scope IDs from minimal queue evidence, requires the assessed IDs to match
-that set exactly, reconciles in-scope/outside-scope/scope-unknown counts, and rejects
-failed trace events. It does not hard-code the source queue size.
+The gate requires live Federato and OpenAI credentials. It independently pages minimal Submission scope evidence, compares the exact expected and assessed ID sets, rejects duplicate, missed, or unrelated assessments, and requires no failed trace event. It writes a credential-free diagnostic artifact to the ignored `artifacts/underwriting-runs/` directory with query audits, traces, ledgers, scoped counts, and the agent stop reason.
 
 ## Current limitations
 
@@ -188,7 +171,7 @@ failed trace events. It does not hard-code the source queue size.
 - External enrichment is deferred because Federato marks it optional.
 - A real OpenAI run requires a server-side key and network access. Automated tests use a scripted transport so CI never consumes API credits.
 - Live acceptance has been verified against the 158-submission Federato challenge dataset; demo mode remains available as a representative schema/query sandbox when credentials are absent.
-- Baseten inference currently uses the authenticated CLI as a thin server-side transport. A direct deployment URL can replace it later without changing the frontend contract.
+- Baseten is an optional additional classifier; deterministic hard requirements remain authoritative.
 - Construction is TIV-weighted when all per-building values exist; otherwise building count is used and disclosed.
 
 See [MVP.md](MVP.md) for the complete scope and decision record.
@@ -196,10 +179,13 @@ See [MVP.md](MVP.md) for the complete scope and decision record.
 
 ### Evidence-search verification
 
-Queue loading retrieves submission identity and links only. The agent receives the live schema,
-selected guideline and unresolved questions. Each query updates the source graph and ledger
-before the next search decision. Final explanations come from deterministic rule outcomes and
-source citations. `activity` contains underwriter-facing events; `trace` retains execution detail.
+Queue loading first retrieves paginated submission identity and package-declared scope evidence.
+Only exact in-scope IDs enter detailed evidence gathering and deterministic assessment; unrelated
+business and unknown scope remain separate counts. The agent receives candidate and discovered
+relationship IDs, the live schema, selected guideline, unresolved questions, coverage, pagination,
+and remaining budget. Each query updates the source graph and ledger before the next search
+decision. Final explanations come from deterministic rule outcomes and source citations.
+`activity` contains query-focused underwriter events; `trace` retains execution detail.
 
 Run the offline replay fixture without OpenAI or Federato network access:
 

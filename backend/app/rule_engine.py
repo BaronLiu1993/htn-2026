@@ -29,9 +29,22 @@ def matches(operator: str, actual: Any, expected: Any) -> bool:
     raise ValueError(f'Unsupported guideline operator "{operator}".')
 
 
-def scope_matches(scope: ScopePredicate, ledger: EvidenceLedger) -> bool:
+def scope_state(
+    scope: ScopePredicate,
+    ledger: EvidenceLedger,
+) -> str:
     fact = ledger.fact(scope.fact)
-    return bool(fact and fact.state == "verified" and matches(scope.operator, fact.value, scope.value))
+    if fact is None or fact.state != "verified":
+        return "scope_unknown"
+    return (
+        "in_scope"
+        if matches(scope.operator, fact.value, scope.value)
+        else "outside_scope"
+    )
+
+
+def scope_matches(scope: ScopePredicate, ledger: EvidenceLedger) -> bool:
+    return scope_state(scope, ledger) == "in_scope"
 
 
 def scope_status(

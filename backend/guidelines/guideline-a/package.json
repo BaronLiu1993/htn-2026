@@ -9,11 +9,16 @@
     "fact": "line_of_business",
     "operator": "contains_normalized",
     "value": "property",
-    "description": "Commercial property submissions"
+    "description": "Commercial property submissions",
+    "source": {
+      "resource": "Submission",
+      "field": "line_of_business",
+      "required": true
+    }
   },
   "required_facts": [
     {"id": "submission_type", "label": "Submission type", "source": {"resource": "Submission", "path": "submission_type"}},
-    {"id": "line_of_business", "label": "Line of business", "source": {"resource": "Policy", "path": "line_of_business"}},
+    {"id": "line_of_business", "label": "Line of business", "source": {"resource": "Submission", "path": "line_of_business"}},
     {"id": "primary_state", "label": "Primary risk state", "source": {"resource": "Location", "path": "primary_state", "field": "state"}},
     {"id": "tiv", "label": "Total insured value", "source": {"resource": "Policy", "path": "tiv"}},
     {"id": "premium", "label": "Total premium", "source": {"resource": "Policy", "path": "premium"}},

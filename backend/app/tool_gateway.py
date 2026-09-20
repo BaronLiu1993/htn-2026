@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import re
 import time
 from datetime import datetime
 from typing import Any, Protocol
 from uuid import uuid4
 
 from .guideline_registry import ToolPolicy
-from .models import TraceEvent
-from .schema_registry import SchemaRegistry
+from .models import QueryAudit, TraceEvent
+from .schema_registry import QueryValidationError, SchemaRegistry
 
 
 class ToolAdapter(Protocol):
@@ -32,6 +34,7 @@ class ToolGateway:
         self.trace = trace
         self.registry: SchemaRegistry | None = None
         self.calls = 0
+        self.query_audits: list[QueryAudit] = []
         missing = set(policy.required_adapters) - set(self.adapters)
         if missing:
             raise RuntimeError(f"Required adapters are not configured: {', '.join(sorted(missing))}.")
@@ -47,7 +50,7 @@ class ToolGateway:
     def budget_remaining(self) -> int:
         return max(0, self.policy.max_calls - self.calls)
 
-    async def schema(self, *, purpose: str = "Discover source schema") -> Any:
+    async def schema(self, *, purpose: str = "Find the available sources of underwriting evidence.") -> Any:
         result = await self._execute("federato", "schema", None, purpose=purpose)
         self.registry = SchemaRegistry(result)
         return result
@@ -56,21 +59,82 @@ class ToolGateway:
         self,
         payload: dict[str, Any],
         *,
-        purpose: str = "Retrieve source evidence",
+        purpose: str = "Need source evidence.",
         fact_ids: list[str] | None = None,
         submission_id: str | None = None,
     ) -> Any:
         if self.registry is None:
             raise RuntimeError("Schema discovery must run before a source query.")
-        self.registry.validate_query(payload)
-        return await self._execute(
-            "federato",
-            "query",
-            payload,
-            purpose=purpose,
-            fact_ids=fact_ids or [],
-            submission_id=submission_id,
+        started_at = datetime.now()
+        started = time.perf_counter()
+        audit_id = f"query_{uuid4().hex[:10]}"
+        payload = self.registry.coerce_query(payload)
+        safe_payload = json.loads(json.dumps(payload, default=str))
+        try:
+            self.registry.validate_query(payload)
+            result = await self._execute(
+                "federato",
+                "query",
+                payload,
+                purpose=purpose,
+                fact_ids=fact_ids or [],
+                submission_id=submission_id,
+            )
+            if self.trace and self.trace[-1].tool == "federato_query":
+                self.trace[-1].source_resource = str(payload.get("resource") or "")
+                self.trace[-1].fact_ids = fact_ids or self.trace[-1].fact_ids
+        except Exception as exc:
+            self.query_audits.append(
+                QueryAudit(
+                    id=audit_id,
+                    payload=safe_payload,
+                    schema_digest=self.registry.schema_digest(),
+                    resource=str(payload.get("resource") or ""),
+                    pagination=_pagination(payload),
+                    started_at=started_at,
+                    duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+                    status="failure",
+                    failed_field_path=_failed_field_path(exc),
+                    error=str(exc),
+                )
+            )
+            raise
+        returned_count, returned_total = _result_counts(result)
+        if self.trace and self.trace[-1].tool == "federato_query":
+            self.trace[-1].records_inspected = returned_count
+            self.trace[-1].source_resource = str(payload.get("resource") or self.trace[-1].source_resource or "")
+            if not self.trace[-1].facts_changed:
+                self.trace[-1].facts_changed = 0
+        self.query_audits.append(
+            QueryAudit(
+                id=audit_id,
+                payload=safe_payload,
+                schema_digest=self.registry.schema_digest(),
+                resource=str(payload.get("resource") or ""),
+                pagination=_pagination(payload),
+                started_at=started_at,
+                duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
+                returned_count=returned_count,
+                returned_total=returned_total,
+                status="success",
+            )
         )
+        return result
+
+    def annotate_query(self, audit_id: str | None, diagnostics: dict[str, Any]) -> None:
+        if not self.query_audits:
+            return
+        audit = (
+            next((item for item in reversed(self.query_audits) if item.id == audit_id), None)
+            if audit_id
+            else self.query_audits[-1]
+        )
+        if audit is not None:
+            audit.attribution.update(diagnostics)
+
+    @property
+    def last_query_audit_id(self) -> str | None:
+        return self.query_audits[-1].id if self.query_audits else None
 
     async def _execute(
         self,
@@ -109,7 +173,7 @@ class ToolGateway:
                     fact_ids=fact_ids or [],
                     adapter=adapter_name,
                     budget_remaining=self.budget_remaining,
-                    result_summary=f"{adapter_name} {action} failed",
+                    result_summary="The source search failed.",
                     error=str(exc),
                 )
             )
@@ -147,11 +211,51 @@ def _selected_fields(payload: dict[str, Any] | None) -> list[str]:
 def _result_summary(action: str, result: Any) -> str:
     if action == "schema":
         registry = SchemaRegistry(result)
-        return f"Found {len(registry.resources)} sources of underwriting evidence"
+        count = len(registry.resources)
+        noun = "source" if count == 1 else "sources"
+        return f"The search found {count} {noun} of underwriting evidence."
+    count, _ = _result_counts(result)
+    if count == 0:
+        return "The search returned no records."
+    noun = "record" if count == 1 else "records"
+    return f"The search returned {count} {noun}."
+
+
+def _pagination(payload: dict[str, Any]) -> dict[str, int]:
+    pagination = payload.get("pagination")
+    if not isinstance(pagination, dict):
+        return {}
+    return {
+        key: value
+        for key in ("limit", "offset")
+        if isinstance((value := pagination.get(key)), int)
+    }
+
+
+def _result_counts(result: Any) -> tuple[int, int | None]:
     if isinstance(result, list):
-        return f"Retrieved {len(result)} records"
-    if isinstance(result, dict):
-        rows = result.get("data") or result.get("records") or result.get("results")
-        if isinstance(rows, list):
-            return f"Retrieved {len(rows)} records"
-    return "Source query completed"
+        return len(result), len(result)
+    if not isinstance(result, dict):
+        return 0, None
+    total = result.get("total")
+    rendered_total = total if isinstance(total, int) else None
+    for key in ("records", "results", "items", "groups"):
+        value = result.get(key)
+        if isinstance(value, list):
+            return len(value), rendered_total
+    nested = result.get("data")
+    if nested is not None and nested is not result:
+        count, nested_total = _result_counts(nested)
+        return count, rendered_total if rendered_total is not None else nested_total
+    return (1 if "id" in result or "_id" in result else 0), rendered_total
+
+
+def _failed_field_path(exc: Exception) -> str | None:
+    if isinstance(exc, QueryValidationError) and exc.field_path:
+        return exc.field_path
+    match = re.search(
+        r'(?:Unknown field in path|Unknown (?:selected )?field)\s+"([^"]+)"',
+        str(exc),
+        re.IGNORECASE,
+    )
+    return match.group(1) if match else None

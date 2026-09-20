@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import time
 from datetime import datetime
+from typing import Any
 from uuid import uuid4
 
 from .adapters import DemoFederatoAdapter, FederatoAdapter
@@ -18,19 +19,99 @@ from .guideline_registry import (
     GuidelineRegistry,
     GuidelineSummary,
 )
-from .live_data import LiveFederatoLoader
+from .live_data import LiveFederatoLoader, ScopeSelection
 from .models import (
     AnalysisRun,
     BatchAnalysisRequest,
+    EvidenceLedger,
     QueueSubmission,
     SchemaStatus,
     SubmissionEvidence,
     TraceEvent,
 )
 from .profile_registry import InvestigationProfile, ProfileRegistry
-from .rule_engine import scope_status
 from .schema_registry import SchemaRegistry
 from .tool_gateway import ToolGateway
+
+
+def _query_metrics(gateway: ToolGateway) -> dict[str, int]:
+    keys = (
+        "records_found",
+        "records_repeated",
+        "records_missing_identifier",
+        "unowned_rows",
+        "unrelated_rows",
+        "state_changes",
+        "value_changes",
+        "useful_fact_changes",
+        "affected_submissions",
+    )
+    return {
+        key: sum(
+            int(audit.attribution.get(key, 0))
+            for audit in gateway.query_audits
+            if isinstance(audit.attribution.get(key, 0), (int, float))
+        )
+        for key in keys
+    }
+
+
+def _same_query_group(left: TraceEvent, right: TraceEvent) -> bool:
+    return (
+        left.tool == right.tool == "federato_query"
+        and left.status == right.status == "success"
+        and left.source_resource == right.source_resource
+        and left.fact_ids == right.fact_ids
+    )
+
+
+def _merge_query_pages(pages: list[TraceEvent]) -> TraceEvent:
+    first = pages[0]
+    records = sum(event.records_inspected or 0 for event in pages)
+    changes = sum(event.facts_changed or 0 for event in pages)
+    duration = sum(event.duration_ms for event in pages)
+    summary = next(
+        (event.result_summary for event in reversed(pages) if event.result_summary),
+        first.result_summary,
+    )
+    return first.model_copy(
+        update={
+            "duration_ms": max(1, duration),
+            "records_inspected": records or None,
+            "facts_changed": changes,
+            "page_count": len(pages),
+            "result_summary": summary,
+        }
+    )
+
+
+def _business_activity(trace: list[TraceEvent]) -> list[TraceEvent]:
+    selected = [
+        event
+        for event in trace
+        if event.tool
+        in {"load_guideline", "prepare_queue", "bind_facts", "federato_query", "plan_fact_sources"}
+        or event.status == "failure"
+    ]
+    grouped: list[TraceEvent] = []
+    buffer: list[TraceEvent] = []
+
+    def flush() -> None:
+        if not buffer:
+            return
+        grouped.append(buffer[0] if len(buffer) == 1 else _merge_query_pages(buffer))
+        buffer.clear()
+
+    for event in selected:
+        if event.tool == "federato_query" and event.status == "success":
+            if buffer and not _same_query_group(buffer[0], event):
+                flush()
+            buffer.append(event)
+            continue
+        flush()
+        grouped.append(event)
+    flush()
+    return grouped
 
 
 class UnderwriteService:
@@ -42,6 +123,7 @@ class UnderwriteService:
         self.registry: SchemaRegistry | None = None
         self._schema_source: str = "not_loaded"
         self.runs: dict[str, AnalysisRun] = {}
+        self._run_artifacts: dict[str, dict[str, Any]] = {}
         self.guideline = self.guidelines.resolve(None)
         self.agent = UnderwritingAgent(settings) if settings.openai_configured else None
         self.baseten = BasetenUnderwriter(settings)
@@ -73,52 +155,57 @@ class UnderwriteService:
     def get_guideline(self, guideline_id: str, version: str | None = None) -> GuidelinePackage:
         return self.guidelines.resolve(guideline_id, version)
 
-    async def _live_evidence(
+    async def _scope_population(
         self,
         gateway: ToolGateway,
         package: GuidelinePackage,
         *,
+        submission_ids: list[str] | None = None,
         force_refresh: bool = False,
-    ) -> tuple[list[SubmissionEvidence], str, LiveFederatoLoader, SchemaRegistry]:
+    ) -> tuple[LiveFederatoLoader, ScopeSelection, str]:
         raw_schema = await gateway.schema(
-            purpose="Identify available underwriting evidence"
+            purpose="Find the available sources of underwriting evidence."
         )
-        registry = SchemaRegistry(raw_schema)
-        self.registry = registry
+        self.registry = SchemaRegistry(raw_schema)
         self._schema_source = "live"
         loader = LiveFederatoLoader(
             gateway,
-            registry,
+            self.registry,
             gateway.trace.append,
             semantic_resources=package.source_plan.resources,
         )
-        evidence = await loader.load()
-        return evidence, "live", loader, registry
-
-    async def _evidence(
-        self,
-        gateway: ToolGateway,
-        package: GuidelinePackage,
-        *,
-        force_refresh: bool = False,
-    ) -> tuple[list[SubmissionEvidence], str, LiveFederatoLoader, SchemaRegistry]:
-        if self.mode == "live":
-            return await self._live_evidence(gateway, package, force_refresh=force_refresh)
-        evidence, _, loader, registry = await self._live_evidence(
-            gateway, package, force_refresh=True
+        self.loader = loader
+        selection = await loader.load_scope(
+            package,
+            requested_ids=submission_ids,
         )
-        self._schema_source = "demo"
-        return evidence, "demo", loader, registry
+        schema_source = "live" if self.mode == "live" else "demo"
+        self._schema_source = schema_source
+        return loader, selection, schema_source
 
     async def list_submissions(self) -> list[QueueSubmission]:
         package = self.guidelines.resolve(None)
         trace: list[TraceEvent] = []
         gateway = self._gateway(package, trace)
-        evidence, _, _, _ = await self._evidence(gateway, package)
-        mapper = FactMapper(package)
+        loader, selection, _ = await self._scope_population(gateway, package)
+        if selection.duplicate_ids:
+            raise RuntimeError(
+                "Scope selection returned duplicate submission identifiers."
+            )
+        await loader.load_insured_records(selection.resource, selection.records)
+        all_records = {**loader.records, selection.resource: selection.records}
+        evidence = loader.normalize(all_records)
+        in_scope = set(selection.in_scope_ids)
+        outside_scope = set(selection.outside_scope_ids)
         output: list[QueueSubmission] = []
         for item in evidence:
-            ledger = mapper.build(item)
+            scope_status = (
+                "in_scope"
+                if item.id in in_scope
+                else "outside_scope"
+                if item.id in outside_scope
+                else "scope_unknown"
+            )
             output.append(
                 QueueSubmission(
                     submission_id=item.id,
@@ -129,7 +216,7 @@ class UnderwriteService:
                     tiv=item.tiv,
                     primary_state=item.primary_state,
                     line_of_business=item.line_of_business,
-                    scope_status=scope_status(package.scope, ledger),
+                    scope_status=scope_status,
                 )
             )
         return output
@@ -148,8 +235,22 @@ class UnderwriteService:
         *,
         schema_source: str,
         started: float,
-        provider: str,
+        gateway: ToolGateway | None = None,
+        selection: ScopeSelection | None = None,
+        ledgers: list[EvidenceLedger] | None = None,
+        provider: str = "openai",
     ) -> AnalysisRun:
+        unresolved_by_reason: dict[str, int] = {}
+        for ledger in ledgers or []:
+            for fact in ledger.facts:
+                if fact.state != "verified":
+                    unresolved_by_reason[fact.state] = (
+                        unresolved_by_reason.get(fact.state, 0) + 1
+                    )
+        required_source_failed = any(
+            event.tool == "federato_query" and event.status == "failure"
+            for event in trace
+        )
         run = AnalysisRun(
             run_id=run_id,
             mode=self.mode,
@@ -165,13 +266,60 @@ class UnderwriteService:
             guideline_version=package.version,
             guideline_effective_date=package.effective_from,
             profile_id=package.investigation_profile_id,
+            available_submissions=selection.available_count if selection else 0,
+            in_scope_submissions=len(selection.in_scope_ids) if selection else 0,
+            outside_scope_submissions=len(selection.outside_scope_ids) if selection else 0,
+            scope_unknown_submissions=len(selection.unknown_scope_ids) if selection else 0,
+            assessed_submissions=0,
+            total_submissions=selection.available_count if selection else 0,
+            applicable_submissions=len(selection.in_scope_ids) if selection else 0,
+            not_applicable_submissions=len(selection.outside_scope_ids) if selection else 0,
             duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
             tool_call_count=sum(event.adapter is not None for event in trace),
+            query_count=len(gateway.query_audits) if gateway else 0,
+            query_metrics=_query_metrics(gateway) if gateway else {},
             agent_mode=f"{provider}_required",
             agent_summary="The run failed. No fallback queue was returned.",
+            agent_stop_reason=(
+                "required_source_failure"
+                if required_source_failed
+                else "run_failed"
+            ),
+            unresolved_facts_by_reason=unresolved_by_reason,
         )
         self.runs[run_id] = run
+        self._store_artifact(run, gateway=gateway, ledgers=ledgers or [])
         return run
+
+    def _store_artifact(
+        self,
+        run: AnalysisRun,
+        *,
+        gateway: ToolGateway | None,
+        ledgers: list[EvidenceLedger],
+    ) -> None:
+        self._run_artifacts[run.run_id] = {
+            "schema_digest": (
+                gateway.registry.schema_digest()
+                if gateway is not None and gateway.registry is not None
+                else None
+            ),
+            "query_audits": [
+                audit.model_dump(mode="json")
+                for audit in (gateway.query_audits if gateway is not None else [])
+            ],
+            "trace": [event.model_dump(mode="json") for event in run.trace],
+            "ledgers": [ledger.model_dump(mode="json") for ledger in ledgers],
+            "counts": {
+                "available": run.available_submissions,
+                "in_scope": run.in_scope_submissions,
+                "outside_scope": run.outside_scope_submissions,
+                "scope_unknown": run.scope_unknown_submissions,
+                "assessed": run.assessed_submissions,
+            },
+            "agent_stop_reason": run.agent_stop_reason,
+            "unresolved_facts_by_reason": run.unresolved_facts_by_reason,
+        }
 
     async def analyze(self, request: BatchAnalysisRequest) -> AnalysisRun:
         started = time.perf_counter()
@@ -201,16 +349,14 @@ class UnderwriteService:
             TraceEvent(
                 id=f"trace_{uuid4().hex[:10]}",
                 tool="load_guideline",
-                purpose="Apply the selected underwriting guideline",
+                purpose="Apply the selected underwriting guideline.",
                 status="success",
                 started_at=datetime.now(),
                 duration_ms=1,
                 fields=[fact.id for fact in package.required_facts],
                 fact_ids=[fact.id for fact in package.required_facts],
                 result_summary=(
-                    f"Using {package.name}, version {package.version}, with "
-                    f"{len(package.requirements)} eligibility requirements and "
-                    f"{len(package.preferences)} target preferences."
+                    f"The system uses {package.name}. Version {package.version}."
                 ),
             )
         )
@@ -242,10 +388,22 @@ class UnderwriteService:
 
         try:
             gateway = self._gateway(package, trace)
-            evidence, schema_source, loader, registry = await self._evidence(
-                gateway, package, force_refresh=request.force_schema_refresh
+            loader, selection, schema_source = await self._scope_population(
+                gateway,
+                package,
+                submission_ids=request.submission_ids,
+                force_refresh=request.force_schema_refresh,
             )
+            if selection.duplicate_ids:
+                raise RuntimeError(
+                    "Scope selection returned duplicate submission identifiers: "
+                    + ", ".join(sorted(set(selection.duplicate_ids))[:10])
+                )
         except Exception as exc:
+            failed_selection = locals().get("selection")
+            if failed_selection is None:
+                failed_loader = getattr(self, "loader", None)
+                failed_selection = getattr(failed_loader, "scope_selection", None)
             return self._failed_run(
                 run_id,
                 package,
@@ -253,70 +411,131 @@ class UnderwriteService:
                 [str(exc)],
                 schema_source="live" if self.mode == "live" else "demo",
                 started=started,
+                gateway=locals().get("gateway"),
+                selection=failed_selection,
                 provider=provider,
             )
 
         mapper = FactMapper(package)
-        mapper.registry = registry
-        search = EvidenceSearch(loader, mapper)
-        if request.submission_ids:
-            requested_ids = set(request.submission_ids)
-            selected = [
-                (submission, ledger)
-                for submission, ledger in zip(search.submissions, search.ledgers)
-                if submission.id in requested_ids
-            ]
-            search.submissions[:] = [submission for submission, _ in selected]
-            search.ledgers[:] = [ledger for _, ledger in selected]
+        mapper.registry = self.registry
+        search = EvidenceSearch(self.loader, mapper)
         ledger_pairs = list(zip(search.submissions, search.ledgers))
-        total_submissions = len(ledger_pairs)
-        scope_states = {
-            submission.id: scope_status(package.scope, ledger)
-            for submission, ledger in ledger_pairs
-        }
-        applicable_ids = {
-            submission_id
-            for submission_id, state in scope_states.items()
-            if state == "applicable"
-        }
-        not_applicable_count = sum(
-            state == "not_applicable" for state in scope_states.values()
+        mapped_facts, unsupported_facts = mapper.apply_bindings(
+            [ledger for _, ledger in ledger_pairs],
+            self.registry or gateway.registry,
         )
-        scope_unknown_count = sum(
-            state == "not_evaluated" for state in scope_states.values()
+        search.ledgers[:] = [mapper.build(item) for item in search.submissions]
+        ledger_pairs = list(zip(search.submissions, search.ledgers))
+        trace.append(
+            TraceEvent(
+                id=f"trace_{uuid4().hex[:10]}",
+                tool="plan_fact_sources",
+                purpose="Link each guideline question to a source field.",
+                status="success",
+                started_at=datetime.now(),
+                duration_ms=1,
+                fact_ids=[*mapped_facts, *unsupported_facts],
+                result_summary=(
+                    f"The system linked {len(mapped_facts)} guideline questions to source fields. "
+                    f"{len(unsupported_facts)} questions have no source field."
+                    if unsupported_facts
+                    else f"The system linked all {len(mapped_facts)} guideline questions to source fields."
+                ),
+            )
         )
-        selected = [
-            (submission, ledger)
-            for submission, ledger in ledger_pairs
-            if submission.id in applicable_ids
-        ]
-        search.submissions[:] = [submission for submission, _ in selected]
-        search.ledgers[:] = [ledger for _, ledger in selected]
+        applicable = ledger_pairs
         trace.append(
             TraceEvent(
                 id=f"trace_{uuid4().hex[:10]}",
                 tool="prepare_queue",
-                purpose=f"Select submissions relevant to {package.name}",
+                purpose="Find submissions that match this guideline.",
                 status="success",
                 started_at=datetime.now(),
                 duration_ms=1,
                 fact_ids=[package.scope.fact],
                 result_summary=(
-                    f"Found {len(applicable_ids)} in-scope submissions from "
-                    f"{total_submissions} available; {not_applicable_count} are outside "
-                    f"scope and {scope_unknown_count} have unknown scope."
+                    f"{len(selection.in_scope_ids)} submissions are in scope. "
+                    f"{len(selection.outside_scope_ids)} submissions are outside scope."
                 ),
             )
         )
 
-        if provider == "baseten" and applicable_ids:
+        agent_result = None
+        if provider == "openai":
+            if self.agent is None:
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    ["OpenAI is required for analysis. Configure OPENAI_API_KEY and restart the backend."],
+                    schema_source=schema_source,
+                    started=started,
+                    gateway=gateway,
+                    selection=selection,
+                    provider=provider,
+                )
             try:
+                agent_result = await asyncio.wait_for(
+                    self.agent.run(
+                        search=search,
+                        ledgers=search.ledgers,
+                        registry=self.registry or gateway.registry,
+                        guideline=package,
+                        profile=profile,
+                        gateway=gateway,
+                        mode=self.mode,
+                        trace=trace,
+                    ),
+                    timeout=self.settings.openai_request_timeout_seconds,
+                )
+            except Exception as exc:
+                source_failed = any(
+                    event.tool == "federato_query" and event.status == "failure"
+                    for event in trace
+                )
+                if source_failed:
+                    message = f"Required Federato evidence query failed: {exc}"
+                elif isinstance(exc, TimeoutError):
+                    message = (
+                        "OpenAI analysis exceeded "
+                        f"{self.settings.openai_request_timeout_seconds:g} seconds."
+                    )
+                else:
+                    message = f"OpenAI analysis failed: {exc}"
+                if not source_failed:
+                    trace.append(
+                        TraceEvent(
+                            id=f"trace_{uuid4().hex[:10]}",
+                            tool="openai_agent",
+                            purpose="Need the evidence for this guideline.",
+                            status="failure",
+                            started_at=datetime.now(),
+                            duration_ms=1,
+                            result_summary="The evidence search did not finish.",
+                            error=message,
+                        )
+                    )
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    [*errors, message],
+                    schema_source=schema_source,
+                    started=started,
+                    gateway=gateway,
+                    selection=selection,
+                    ledgers=search.ledgers,
+                    provider=provider,
+                )
+        elif provider == "baseten":
+            try:
+                keep_ids = {item.id for item in search.submissions}
                 await loader.load_declared_resources()
                 search = EvidenceSearch(loader, mapper)
                 selected = [
                     (submission, ledger)
                     for submission, ledger in zip(search.submissions, search.ledgers)
-                    if submission.id in applicable_ids
+                    if submission.id in keep_ids
                 ]
                 search.submissions[:] = [submission for submission, _ in selected]
                 search.ledgers[:] = [ledger for _, ledger in selected]
@@ -328,94 +547,18 @@ class UnderwriteService:
                     [f"Federato evidence retrieval failed: {exc}"],
                     schema_source=schema_source,
                     started=started,
+                    gateway=gateway,
+                    selection=selection,
                     provider=provider,
                 )
 
-        ledger_pairs = list(zip(search.submissions, search.ledgers))
-        mapped_facts, unsupported_facts = mapper.apply_schema_plan(
-            [ledger for _, ledger in ledger_pairs],
-            registry,
-        )
-        trace.append(
-            TraceEvent(
-                id=f"trace_{uuid4().hex[:10]}",
-                tool="plan_fact_sources",
-                purpose="Confirm the available submission data can answer the guideline questions",
-                status="success",
-                started_at=datetime.now(),
-                duration_ms=1,
-                fact_ids=[*mapped_facts, *unsupported_facts],
-                result_summary=(
-                    f"The data can answer {len(mapped_facts)} required questions; "
-                    f"{len(unsupported_facts)} question(s) have no available source."
-                ),
-            )
-        )
-
-        agent_result = None
-        if provider == "openai" and search.submissions:
-            try:
-                agent_result = await asyncio.wait_for(
-                    self.agent.run(
-                        search=search,
-                        ledgers=search.ledgers,
-                        registry=registry,
-                        guideline=package,
-                        profile=profile,
-                        gateway=gateway,
-                        mode=self.mode,
-                        trace=trace,
-                    ),
-                    timeout=self.settings.openai_request_timeout_seconds,
-                )
-            except Exception as exc:
-                message = (
-                    f"OpenAI analysis exceeded {self.settings.openai_request_timeout_seconds:g} seconds."
-                    if isinstance(exc, TimeoutError)
-                    else f"OpenAI analysis failed: {exc}"
-                )
-                trace.append(
-                    TraceEvent(
-                        id=f"trace_{uuid4().hex[:10]}",
-                        tool="openai_agent",
-                        purpose="Gather unresolved evidence before evaluation",
-                        status="failure",
-                        started_at=datetime.now(),
-                        duration_ms=1,
-                        result_summary="OpenAI analysis failed; no fallback result was returned",
-                        error=message,
-                    )
-                )
-                return self._failed_run(
-                    run_id,
-                    package,
-                    trace,
-                    [*errors, message],
-                    schema_source=schema_source,
-                    started=started,
-                    provider=provider,
-                )
-
-        failed_source_events = [
-            event
-            for event in trace
-            if event.tool == "federato_query" and event.status == "failure"
-        ]
-        if failed_source_events:
-            messages = [
-                event.error or "A required Federato evidence query failed."
-                for event in failed_source_events
-            ]
-            return self._failed_run(
-                run_id,
-                package,
-                trace,
-                list(dict.fromkeys(messages)),
-                schema_source=schema_source,
-                started=started,
-                provider=provider,
-            )
-
+        mapper.finalize_unbound(search.ledgers)
+        try:
+            if provider == "openai" and gateway.budget_remaining > 0:
+                await search.fill_headquarters(gateway)
+        except Exception as exc:
+            errors.append(f"Headquarters evidence search failed: {exc}")
+        mapper.finalize_unbound(search.ledgers)
         applicable = list(zip(search.submissions, search.ledgers))
         resolved_by_agent = search.useful_changes
 
@@ -435,12 +578,14 @@ class UnderwriteService:
                     id=f"trace_{uuid4().hex[:10]}",
                     submission_id=item.id,
                     tool="evaluate_guideline",
-                    purpose=f"Apply deterministic requirements for {item.submission_number}",
+                    purpose="Apply the guideline rules to this submission.",
                     status="success",
                     started_at=datetime.now(),
                     duration_ms=max(1, int((time.perf_counter() - evaluation_started) * 1000)),
                     fact_ids=[fact.fact_id for fact in ledger.facts],
-                    result_summary=f"Classified {item.submission_number} as {assessment.status.replace('_', ' ')}",
+                    result_summary=(
+                        f"The submission is {assessment.status.replace('_', ' ')}."
+                    ),
                 )
             )
 
@@ -475,6 +620,9 @@ class UnderwriteService:
                     [*errors, message],
                     schema_source=schema_source,
                     started=started,
+                    gateway=gateway,
+                    selection=selection,
+                    ledgers=search.ledgers,
                     provider=provider,
                 )
             if baseten_result.failures:
@@ -503,6 +651,7 @@ class UnderwriteService:
                     ),
                 )
             )
+
         unresolved = sum(
             fact.state != "verified"
             for _, ledger in applicable
@@ -522,16 +671,21 @@ class UnderwriteService:
             guideline_version=package.version,
             guideline_effective_date=package.effective_from,
             profile_id=package.investigation_profile_id,
-            total_submissions=total_submissions,
-            applicable_submissions=len(applicable),
-            not_applicable_submissions=not_applicable_count,
-            scope_unknown_submissions=scope_unknown_count,
+            available_submissions=selection.available_count,
+            in_scope_submissions=len(selection.in_scope_ids),
+            outside_scope_submissions=len(selection.outside_scope_ids),
+            scope_unknown_submissions=len(selection.unknown_scope_ids),
+            assessed_submissions=len(assessments),
+            total_submissions=selection.available_count,
+            applicable_submissions=len(selection.in_scope_ids),
+            not_applicable_submissions=len(selection.outside_scope_ids),
             duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
             tool_call_count=gateway.calls,
             unresolved_fact_count=unresolved,
             useful_fact_changes=resolved_by_agent,
-            query_count=sum(event.tool == "federato_query" for event in trace),
-            activity=[event for event in trace if event.tool not in {"openai_agent", "plan_fact_sources"} or event.status == "failure"],
+            query_count=len(gateway.query_audits),
+            query_metrics=_query_metrics(gateway),
+            activity=_business_activity(trace),
             agent_mode=provider,
             agent_model=(
                 agent_result.model
@@ -539,17 +693,26 @@ class UnderwriteService:
                 else baseten_result.model if baseten_result is not None else None
             ),
             agent_summary=(
-                f"Reviewed all {len(assessments)} submissions against {package.name}. "
-                f"The evidence search updated {resolved_by_agent} underwriting answers."
-                if provider == "openai"
+                agent_result.report.plan_summary
+                if agent_result is not None
                 else (
                     f"Classified {len(assessments)} normalized submissions with "
                     f"{baseten_result.agreement_rate:.1%} agreement against the deterministic "
                     "guideline engine. Deterministic hard requirements remain authoritative."
+                    if baseten_result is not None
+                    else None
                 )
             ),
             agent_adaptations=(
                 agent_result.report.adaptations if agent_result is not None else []
+            ),
+            agent_stop_reason=(
+                agent_result.stop_reason if agent_result is not None else None
+            ),
+            unresolved_facts_by_reason=(
+                agent_result.unresolved_facts_by_reason
+                if agent_result is not None
+                else {}
             ),
             model_latency_ms=(
                 agent_result.model_latency_ms
@@ -580,7 +743,11 @@ class UnderwriteService:
             ),
         )
         self.runs[run_id] = run
+        self._store_artifact(run, gateway=gateway, ledgers=search.ledgers)
         return run
 
     def get_run(self, run_id: str) -> AnalysisRun | None:
         return self.runs.get(run_id)
+
+    def get_run_artifact(self, run_id: str) -> dict[str, Any] | None:
+        return self._run_artifacts.get(run_id)
