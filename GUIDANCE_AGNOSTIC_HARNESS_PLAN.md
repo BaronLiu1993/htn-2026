@@ -1,3 +1,5 @@
+> Current implementation decisions and remaining work are in `UNDERWRITING_AGENT_HANDOFF.md`. Its latest scope-first selection requirement supersedes conflicting details in this historical plan.
+
 # Guidance-Agnostic Underwriting Harness Plan
 
 ## Outcome

@@ -9,3 +9,4 @@ __pycache__/
 backend/.venv/
 frontend/.next/
 frontend/node_modules/
+.playwright-cli
