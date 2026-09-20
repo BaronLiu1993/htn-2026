@@ -25,7 +25,9 @@
 /* Deliberate exception: a 9px absolutely positioned dot with no layout dependents, so
    animating `left` is cheap and the marker can travel to its reading. */
 .uw-ev-marker{position:absolute;top:50%;width:9px;height:9px;margin-left:-4.5px;border:2px solid var(--uw-surface);border-radius:50%;background:var(--uw-ev-accent);box-shadow:0 1px 3px #24242240;translate:0 -50%;transition:left 200ms cubic-bezier(.23,1,.32,1)}
-.uw-evidence-popup .uw-ev-meta{display:flex;flex-wrap:wrap;align-items:baseline;justify-content:space-between;gap:2px 10px;margin:8px 0 0;color:var(--uw-muted);font-size:10px;font-variant-numeric:tabular-nums}.uw-ev-domain{color:var(--uw-secondary);text-align:right}
+.uw-evidence-popup .uw-ev-meta{margin:6px 0 0;color:var(--uw-muted);font-size:10px;font-variant-numeric:tabular-nums}
+.uw-ev-axis{position:relative;height:12px;margin-top:5px}.uw-ev-axis-label{position:absolute;top:0;color:var(--uw-secondary);font-size:9.5px;line-height:1;white-space:nowrap;font-variant-numeric:tabular-nums}
+.uw-checks{display:grid;gap:0;margin:10px 0 0}.uw-checks>div{display:flex;align-items:baseline;justify-content:space-between;gap:8px 14px;flex-wrap:wrap;padding:6px 0;border-top:1px solid var(--uw-border-soft)}.uw-checks dt{flex:0 0 auto;color:var(--uw-secondary);font-size:11px}.uw-checks dd{display:flex;align-items:baseline;justify-content:flex-end;flex-wrap:wrap;gap:2px 8px;min-width:0;margin:0;text-align:right;font-size:11px;font-variant-numeric:tabular-nums}.uw-checks dd strong{font-weight:560}.uw-checks dd span{color:var(--uw-muted);font-size:10px;text-wrap:pretty}
 .uw-evidence-popup .uw-ev-source{margin:11px 0 0;padding-top:9px;border-top:1px solid var(--uw-border-soft);color:var(--uw-muted);font-size:10px;line-height:1.45}
 .uw-evidence-popup .uw-ev-also{display:flex;align-items:baseline;justify-content:space-between;gap:10px;margin:5px 0 0;color:var(--uw-secondary);font-size:10px}
 .uw-ev-state{font-size:10px;font-weight:550;white-space:nowrap}.uw-ev-state.passed,.uw-ev-state.matched{color:var(--uw-target)}.uw-ev-state.failed{color:var(--uw-danger)}.uw-ev-state.not_matched,.uw-ev-state.unresolved{color:var(--uw-warning)}

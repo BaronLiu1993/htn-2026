@@ -7,7 +7,7 @@ import {
   Activity, AlertTriangle, BookOpen, Check, ChevronDown, CircleX,
   Database, ListFilter, LoaderCircle, Play, RefreshCw, Search, Target, X,
 } from "lucide-react";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, useCallback, useEffect, useMemo, useState } from "react";
 import {
   AnalysisRunError,
   analyzeSubmissions,
@@ -22,8 +22,8 @@ import type {
   QueueSubmission, TraceEvent,
 } from "../../lib/types";
 import {
-  type DisplayEvidence, allEvidence, copeEvidence, evidenceFor, evidenceStateLabel,
-  exactValue, limitPhrase, money, position, ruleEvidence, shortValue, verdictLabel,
+  type DisplayEvidence, type Tick, allEvidence, copeEvidence, evidenceFor, evidenceStateLabel,
+  limitPhrase, money, position, ruleEvidence, ruleSummary, shortValue, verdictLabel,
 } from "../../lib/evidence";
 import "./underwriting-queue.css";
 
@@ -72,7 +72,7 @@ function Badge({ assessment }: { assessment: Assessment }) {
 
 /** Value plotted against the rule's real threshold, with every other rule on the same axis. */
 function EvidenceScale({ evidence }: { evidence: DisplayEvidence }) {
-  const { domain, band, ticks, numeric, display } = evidence;
+  const { domain, band, ticks, numeric } = evidence;
   const [settled, setSettled] = useState(false);
   useEffect(() => {
     const frame = requestAnimationFrame(() => setSettled(true));
@@ -80,40 +80,96 @@ function EvidenceScale({ evidence }: { evidence: DisplayEvidence }) {
   }, []);
   if (!domain) return null;
   const at = numeric === null ? 0 : position(domain, numeric);
-  // The binding threshold is already named in the headline, so only label the other rules'.
-  const labelled = ticks.filter((tick) => tick.ruleId !== evidence.ruleId);
+  const room = headroomText(evidence);
   return (
-    <div className="uw-ev-scale" data-unknown={numeric === null ? "" : undefined}>
+    <div className="uw-ev-scale" data-unknown={numeric === null ? "" : undefined} aria-hidden="true">
       <div className="uw-ev-track">
         {band && <span className="uw-ev-band" style={{ left: `${band.left * 100}%`, width: `${band.width * 100}%` }} />}
         {ticks.map((tick) => <span key={tick.key} className={`uw-ev-tick ${tick.kind}`} style={{ left: `${tick.at * 100}%` }} />)}
         {numeric !== null && <span className="uw-ev-marker" style={{ left: `${(settled ? at : 0) * 100}%` }} />}
       </div>
-      <p className="uw-ev-meta">
-        <span>{numeric === null ? "Nothing to plot" : headroomText(evidence)}</span>
-        {labelled.length > 0 && <span className="uw-ev-domain">{labelled.map((tick) => tick.label).join(" · ")}</span>}
-      </p>
-      <span className="uw-sr-only">
-        {numeric !== null && `${exactValue(numeric, display)} against ${ticks.map((tick) => tick.label).join(" and ")}.`}
-      </span>
+      {ticks.length > 0 && (
+        <div className="uw-ev-axis">
+          {spacedTicks(ticks).map((tick) => (
+            <span key={tick.key} className="uw-ev-axis-label" style={edgeSafe(tick.at)}>{tick.label}</span>
+          ))}
+        </div>
+      )}
+      {room && <p className="uw-ev-meta">{room}</p>}
     </div>
   );
 }
 
-function headroomText(evidence: DisplayEvidence): string {
-  const { numeric, threshold, operator } = evidence;
-  if (numeric === null || threshold === null || Array.isArray(threshold) || threshold === 0) {
-    return evidence.expected;
+/** Axis labels are centred on their tick, so drop any that would collide with the last kept one. */
+function spacedTicks(ticks: Tick[]): Tick[] {
+  const kept: Tick[] = [];
+  for (const tick of ticks) {
+    if (kept.length === 0 || tick.at - kept[kept.length - 1].at >= 0.16) kept.push(tick);
   }
-  const used = operator === "lt" || operator === "lte" ? numeric / threshold : threshold / numeric;
-  const share = Math.max(0, Math.min(1, used));
-  return evidence.verdict === "pass"
-    ? `${Math.round((1 - share) * 100)}% headroom`
-    : `${Math.round(share * 100)}% of the limit`;
+  return kept;
+}
+
+function edgeSafe(at: number): CSSProperties {
+  if (at <= 0.06) return { left: 0 };
+  if (at >= 0.94) return { right: 0 };
+  return { left: `${at * 100}%`, transform: "translateX(-50%)" };
+}
+
+/** A gap is a distance, not a value: percentage points and year counts, never $0.4 or 1,990. */
+function gapText(diff: number, display: DisplayEvidence["display"]): string {
+  if (display === "percent") return `${Math.round(diff * 100)} pts`;
+  if (display === "year") return `${Math.round(diff)} yr`;
+  return shortValue(diff, display);
+}
+
+/**
+ * How much room is left, in the fact's own units. A share of a year or of a floor is
+ * meaningless, so only a passing cap gets the normalised "headroom" reading.
+ */
+function headroomText(evidence: DisplayEvidence): string {
+  const { numeric, threshold, operator, display, verdict } = evidence;
+  if (numeric === null || threshold === null) return "";
+  if (Array.isArray(threshold)) {
+    const [low, high] = threshold;
+    if (numeric < low) return `${gapText(low - numeric, display)} below the range`;
+    if (numeric > high) return `${gapText(numeric - high, display)} above the range`;
+    return `${gapText(Math.min(numeric - low, high - numeric), display)} inside the range`;
+  }
+  const gap = Math.abs(numeric - threshold);
+  if (gap === 0) return "exactly at the limit";
+  if (display === "year") {
+    return verdict === "pass"
+      ? `${gapText(gap, display)} newer than the cutoff`
+      : `${gapText(gap, display)} older than the cutoff`;
+  }
+  if (operator === "lt" || operator === "lte") {
+    return verdict === "pass" && threshold !== 0
+      ? `${Math.round((1 - numeric / threshold) * 100)}% headroom`
+      : `${gapText(gap, display)} over the cap`;
+  }
+  return verdict === "pass"
+    ? `${gapText(gap, display)} above the floor`
+    : `${gapText(gap, display)} short of the floor`;
+}
+
+/**
+ * A string fact like "CA" carries no numeric value, so numeric-ness cannot stand in for
+ * "unconfirmed" — only the rule's own state can say that.
+ */
+function EvidenceLine({ evidence }: { evidence: DisplayEvidence }) {
+  const { numeric, display, threshold, operator, value, ruleName, expected, shape } = evidence;
+  if (shape === "context") return <strong>{value}</strong>;
+  if (evidence.ruleState === "unresolved") {
+    return <>{value === "Not available" ? "Not found in source data" : value}, so <strong>{ruleName}</strong> is unconfirmed</>;
+  }
+  if (numeric !== null && threshold !== null) {
+    return <><strong>{shortValue(numeric, display)}</strong> against {limitPhrase(threshold, operator, display)}</>;
+  }
+  return <><strong>{value}</strong> {evidence.verdict === "pass" ? "is within" : "is outside"} {expected}</>;
 }
 
 function EvidenceCard({ evidence, number, demo }: { evidence: DisplayEvidence; number: number; demo: boolean }) {
-  const { verdict, ruleState, numeric, display, threshold, operator } = evidence;
+  const { verdict, ruleState } = evidence;
   const Icon = verdict === "pass" ? Check : verdict === "fail" ? CircleX : AlertTriangle;
   return (
     <Popover.Root>
@@ -133,11 +189,7 @@ function EvidenceCard({ evidence, number, demo }: { evidence: DisplayEvidence; n
             )}
 
             <Popover.Description className="uw-ev-line">
-              {numeric === null
-                ? <>{evidence.value === "Not available" ? "Missing" : evidence.value}, so <strong>{evidence.ruleName}</strong> cannot be confirmed</>
-                : threshold !== null
-                  ? <><strong>{shortValue(numeric, display)}</strong> against {limitPhrase(threshold, operator, display)}</>
-                  : <><strong>{evidence.value}</strong> · {evidence.expected}</>}
+              <EvidenceLine evidence={evidence} />
             </Popover.Description>
 
             <EvidenceScale evidence={evidence} />
@@ -249,10 +301,10 @@ function Review({ assessment, run, pkg }: { assessment: Assessment; run: Analysi
   const [actionOpen, setActionOpen] = useState(false);
   const unresolved = assessment.status === "needs_review";
   const excluded = assessment.status === "out_of_appetite";
-  const eligibility = unresolved
-    ? assessment.unresolved_rules.flatMap((rule) => ruleEvidence(rule, ctx))
-    : excluded ? assessment.failed_requirements.flatMap((rule) => ruleEvidence(rule, ctx)) : assessment.passed_requirements.flatMap((rule) => ruleEvidence(rule, ctx));
   const preferences = assessment.matched_preferences.flatMap((rule) => ruleEvidence(rule, ctx));
+  // Rule names read as satisfied conditions, so a failure needs found-vs-needed spelled out.
+  const checks = (unresolved ? assessment.unresolved_rules : excluded ? assessment.failed_requirements : [])
+    .map((rule) => ruleSummary(rule, ctx));
   const markerIndex = [
     ...evidenceFor(evidence, ["state"]).slice(0, 1),
     ...evidenceFor(evidence, ["tiv", "insured_value", "insured value"]).slice(0, 1),
@@ -268,7 +320,10 @@ function Review({ assessment, run, pkg }: { assessment: Assessment; run: Analysi
     <section className="uw-assessment-summary">
       <div className="uw-section-kicker">Assessment</div>
       <h3>{unresolved ? "Eligibility is not established." : excluded ? "This account is outside appetite." : assessment.status === "target" ? "Eligible with a strong target fit." : "Eligible with an acceptable target fit."}</h3>
-      <p>{assessment.explanation} <Bundle items={eligibility} label={unresolved ? "missing evidence" : excluded ? "exclusion evidence" : `${eligibility.length} eligibility records`} demo={run.mode === "demo"} />{preferences.length > 0 && <> · <Bundle items={preferences} label="preference evidence" demo={run.mode === "demo"} /></>}</p>
+      <p>{assessment.explanation}</p>
+      {checks.length > 0 && <dl className="uw-checks">
+        {checks.map((check) => <div key={check.id}><dt>{check.label}</dt><dd><strong>{check.found}</strong><span>needs {check.needs}</span></dd></div>)}
+      </dl>}
     </section>
     {(issues.length > 0 || excluded) && <section className={`uw-review-alert ${excluded ? "danger" : "warning"}`}>
       {excluded ? <CircleX size={16} /> : <AlertTriangle size={16} />}<div><strong>{excluded ? "Confirmed exclusion" : "Missing information and warnings"}</strong>{issues.length ? <ul>{issues.map((item) => <li key={item}>{item}</li>)}</ul> : <p>Target preferences cannot override a confirmed appetite exclusion.</p>}</div>
