@@ -390,6 +390,58 @@ export function ruleEvidence(rule: RuleOutcome, ctx: EvidenceContext): DisplayEv
   );
 }
 
+/** Rule names read as satisfied conditions, so failures need a neutral subject instead. */
+const FACT_LABEL: Record<string, string> = {
+  tiv: "Insured value",
+  premium: "Premium",
+  primary_state: "State",
+  line_of_business: "Line of business",
+  submission_type: "Submission type",
+  oldest_building_year: "Oldest building",
+  acceptable_construction_share: "Acceptable construction",
+  five_year_loss_total: "Five-year losses",
+};
+
+function factLabel(factId: string | null, fallback: string): string {
+  if (!factId) return fallback;
+  const known = FACT_LABEL[factId];
+  if (known) return known;
+  const words = factId.replace(/_/g, " ");
+  return `${words[0].toUpperCase()}${words.slice(1)}`;
+}
+
+/**
+ * Expected strings are authored sentence-case ("At most $150M"), so they need lowercasing to
+ * splice in after "needs". Acronym openers like "OH, PA, MD" must survive untouched.
+ */
+function asClause(expected: string): string {
+  if (/^[A-Z]{2}/.test(expected)) return expected;
+  if (!/^[A-Z]/.test(expected)) return expected;
+  return `${expected[0].toLowerCase()}${expected.slice(1)}`;
+}
+
+export type RuleSummary = { id: string; label: string; found: string; needs: string };
+
+/** One scannable row per rule: the neutral subject, what was found, what the rule wants. */
+export function ruleSummary(rule: RuleOutcome, ctx: EvidenceContext): RuleSummary {
+  const packageRule = packageRules(ctx.pkg).find((entry) => entry.id === rule.rule_id);
+  const factId = packageRule?.fact ?? null;
+  const ledgerFact = ctx.assessment.ledger?.facts.find((fact) => fact.fact_id === factId);
+  const numeric =
+    typeof ledgerFact?.value === "number"
+      ? ledgerFact.value
+      : typeof rule.actual_value === "number"
+        ? rule.actual_value
+        : null;
+  const display = displayFor(ctx.pkg, factId, numeric, rule.expected);
+  return {
+    id: rule.rule_id,
+    label: factLabel(factId, rule.name),
+    found: numeric === null ? valueText(rule.actual_value) : shortValue(numeric, display),
+    needs: asClause(rule.expected),
+  };
+}
+
 export function copeEvidence(
   item: UnderwritingConsideration,
   ctx: EvidenceContext,

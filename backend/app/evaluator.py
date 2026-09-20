@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import date
 from functools import cmp_to_key
 
@@ -17,12 +18,14 @@ from .profile_registry import InvestigationProfile, ProfileRegistry
 from .rule_engine import evaluate_package
 
 
-def _money(value: float | None) -> str:
-    if value is None:
-        return "unknown"
-    if abs(value) >= 1_000_000:
-        return f"${value / 1_000_000:.1f}M"
-    return f"${value / 1_000:.0f}K"
+def _join(names: Iterable[str], limit: int = 3) -> str:
+    items = list(dict.fromkeys(names))
+    head, extra = items[:limit], len(items) - limit
+    if extra > 0:
+        return f"{', '.join(head)}, and {extra} more"
+    if len(head) > 2:
+        return f"{', '.join(head[:-1])}, and {head[-1]}"
+    return " and ".join(head)
 
 
 def _conflict_outcome(submission: SubmissionEvidence) -> RuleOutcome:
@@ -149,32 +152,34 @@ def evaluate_ledger(
 
     if failed:
         status = "out_of_appetite"
-        failed_names = ", ".join(item.name.lower() for item in failed[:2])
+        noun = "requirement" if len(failed) == 1 else "requirements"
         explanation = (
-            f"Out of appetite because it fails {failed_names}. "
-            "Preferences cannot override a hard requirement."
+            f"Outside appetite: {len(failed)} {noun} not met "
+            f"({_join(item.name for item in failed)}). "
+            "Target preferences cannot offset a failed requirement."
         )
         action = "Deprioritize and confirm the failed requirement before further review"
     elif unresolved:
         status = "needs_review"
-        unresolved_names = ", ".join(item.name.lower() for item in unresolved[:2])
+        noun = "check" if len(unresolved) == 1 else "checks"
         explanation = (
-            f"Needs review because {unresolved_names} cannot be resolved from the available "
-            "evidence. No hard failure is verified."
+            f"Eligibility unconfirmed: {len(unresolved)} {noun} could not be resolved from "
+            f"source evidence ({_join(item.name for item in unresolved)}). "
+            "No hard failure was verified."
         )
         action = "Request the missing or conflicting information"
     elif target_total > 0 and target_matches == target_total:
         status = "target"
         explanation = (
-            f"Passes all hard requirements and matches all {target_total} preferences in "
+            f"Meets every requirement and all {target_total} target preferences in "
             f"{package.name}."
         )
         action = "Prioritize for underwriting review"
     else:
         status = "acceptable"
         explanation = (
-            f"Passes all hard requirements and matches {target_matches} of {target_total} "
-            f"preferences. TIV is {_money(submission.tiv)} and premium is {_money(submission.premium)}."
+            f"Meets every requirement and {target_matches} of {target_total} target "
+            "preferences."
         )
         action = "Keep in the review queue after target submissions"
 
@@ -191,23 +196,6 @@ def evaluate_ledger(
             if key not in seen:
                 seen.add(key)
                 all_evidence.append(item)
-
-    factors = failed or unresolved or matched or passed
-    details = []
-    for outcome in factors[:2]:
-        sources = sorted({f"{item.resource} {item.record_id}" for item in outcome.evidence if item.state == "verified"})
-        value = outcome.actual_value
-        detail = f"{outcome.name}: {value if value is not None else 'unconfirmed'}"
-        if sources:
-            detail += f" (source: {', '.join(sources[:2])})"
-        details.append(detail)
-    match_text = {
-        "target": "Matches the guideline's target appetite",
-        "acceptable": "Meets the guideline's required appetite",
-        "needs_review": "Needs review against the selected guideline",
-        "out_of_appetite": "Falls outside the selected guideline's appetite",
-    }[status]
-    explanation = f"{match_text}. {'; '.join(details)}. {action}."
 
     considerations = build_profile_considerations(
         ledger, package, profile, submission
