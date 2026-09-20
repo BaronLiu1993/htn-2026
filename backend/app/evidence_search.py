@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from datetime import datetime
 from typing import Any
 
@@ -60,6 +61,22 @@ class EvidenceSearch:
                 if fact_id in self.mapper.bindings
             ],
         }
+
+    def prepare_query(self, query: dict[str, Any]) -> dict[str, Any]:
+        """Complete expanded projections with schema-valid evidence fields."""
+        prepared = deepcopy(query)
+        resource = prepared.get("resource")
+        expand = prepared.get("expand")
+        if not isinstance(resource, str) or not isinstance(expand, dict):
+            return prepared
+        prepared["select"] = _expanded_projection(
+            self.loader.registry,
+            self.mapper,
+            resource,
+            expand,
+            prepared.get("select"),
+        )
+        return prepared
 
     def _ingest(self, resource: str, row: dict[str, Any]) -> None:
         identifier = _identifier(row)
@@ -141,8 +158,7 @@ class EvidenceSearch:
         missing = [
             item
             for item in self.submissions
-            if not _has_linked_policy(item)
-            and (
+            if (
                 item.insured_name == "Unnamed account"
                 or item.primary_state is None
                 or item.tiv is None
@@ -396,6 +412,64 @@ class EvidenceSearch:
 
 def _normalized_key(value: str) -> str:
     return "".join(character for character in value.lower() if character.isalnum())
+
+
+def _select_object(select: Any) -> dict[str, Any]:
+    if isinstance(select, list):
+        return {
+            item: True
+            for item in select
+            if isinstance(item, str)
+        }
+    if not isinstance(select, dict):
+        return {}
+    expanded = select.get("$expand")
+    if expanded is True:
+        return {}
+    if isinstance(expanded, dict):
+        nested = expanded.get("select")
+        return dict(nested) if isinstance(nested, dict) else dict(expanded)
+    return dict(select)
+
+
+def _expanded_projection(
+    registry: Any,
+    mapper: FactMapper,
+    resource: str,
+    expand: dict[str, Any],
+    select: Any,
+) -> dict[str, Any]:
+    projection = _select_object(select)
+    fields = registry.fields_for(resource)
+    identifier = registry.identifier_field(resource)
+    projection[identifier] = True
+
+    bound_fields = mapper.bound_fields(resource)
+    for field in fields:
+        if _normalized_key(field) in bound_fields:
+            projection[field] = True
+
+    references = {
+        reference.field: reference
+        for reference in registry.references_for(resource)
+    }
+    for field in references:
+        projection.setdefault(field, True)
+
+    for field, nested_expand in expand.items():
+        reference = references.get(field)
+        if reference is None:
+            continue
+        existing = projection.get(field)
+        nested_select = existing if isinstance(existing, (dict, list)) else None
+        projection[field] = _expanded_projection(
+            registry,
+            mapper,
+            reference.target,
+            nested_expand if isinstance(nested_expand, dict) else {},
+            nested_select,
+        )
+    return projection
 
 
 def _supported_fields(mapper: FactMapper, resource: str) -> set[str]:
