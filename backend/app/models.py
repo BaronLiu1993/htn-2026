@@ -12,7 +12,8 @@ AssessmentStatus = Literal[
 EvidenceState = Literal["verified", "missing", "conflicting", "ambiguous", "unavailable"]
 RuleState = Literal["passed", "failed", "matched", "not_matched", "unresolved"]
 TraceStatus = Literal["success", "retry", "failure", "cached"]
-AgentMode = Literal["openai", "openai_required"]
+AgentMode = Literal["openai", "baseten", "openai_required", "baseten_required"]
+ModelProvider = Literal["openai", "baseten"]
 
 
 class BuildingEvidence(BaseModel):
@@ -181,6 +182,7 @@ class BatchAnalysisRequest(BaseModel):
     force_schema_refresh: bool = False
     guideline_id: str
     guideline_version: str | None = None
+    model_provider: ModelProvider = "openai"
 
 
 class AnalysisRun(BaseModel):
@@ -210,6 +212,11 @@ class AnalysisRun(BaseModel):
     agent_model: str | None = None
     agent_summary: str | None = None
     agent_adaptations: list[str] = Field(default_factory=list)
+    model_latency_ms: int = 0
+    model_prompt_tokens: int = 0
+    model_completion_tokens: int = 0
+    model_valid_output_rate: float | None = None
+    model_agreement_rate: float | None = None
 
 
 class SchemaStatus(BaseModel):
@@ -226,3 +233,4 @@ class HealthResponse(BaseModel):
     mode: Literal["demo", "live"]
     federato_configured: bool
     openai_configured: bool
+    baseten_configured: bool

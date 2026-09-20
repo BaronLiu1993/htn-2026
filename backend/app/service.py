@@ -7,6 +7,7 @@ from uuid import uuid4
 
 from .adapters import DemoFederatoAdapter, FederatoAdapter
 from .agent import UnderwritingAgent
+from .baseten_agent import BasetenRunResult, BasetenUnderwriter
 from .evidence_search import EvidenceSearch
 from .config import Settings
 from .evidence_ledger import FactMapper
@@ -42,6 +43,7 @@ class UnderwriteService:
         self.runs: dict[str, AnalysisRun] = {}
         self.guideline = self.guidelines.resolve(None)
         self.agent = UnderwritingAgent(settings) if settings.openai_configured else None
+        self.baseten = BasetenUnderwriter(settings)
 
     @property
     def mode(self) -> str:
@@ -141,6 +143,7 @@ class UnderwriteService:
         *,
         schema_source: str,
         started: float,
+        provider: str,
     ) -> AnalysisRun:
         run = AnalysisRun(
             run_id=run_id,
@@ -159,7 +162,7 @@ class UnderwriteService:
             profile_id=package.investigation_profile_id,
             duration_ms=max(1, int((time.perf_counter() - started) * 1000)),
             tool_call_count=sum(event.adapter is not None for event in trace),
-            agent_mode="openai_required",
+            agent_mode=f"{provider}_required",
             agent_summary="The run failed. No fallback queue was returned.",
         )
         self.runs[run_id] = run
@@ -167,6 +170,7 @@ class UnderwriteService:
 
     async def analyze(self, request: BatchAnalysisRequest) -> AnalysisRun:
         started = time.perf_counter()
+        provider = request.model_provider
         run_id = f"run_{uuid4().hex[:12]}"
         trace: list[TraceEvent] = []
         errors: list[str] = []
@@ -185,6 +189,7 @@ class UnderwriteService:
                 [f"Invalid guideline selection: {exc}"],
                 schema_source="live" if self.mode == "live" else "demo",
                 started=started,
+                provider=provider,
             )
 
         trace.append(
@@ -204,7 +209,7 @@ class UnderwriteService:
                 ),
             )
         )
-        if self.agent is None:
+        if provider == "openai" and self.agent is None:
             return self._failed_run(
                 run_id,
                 package,
@@ -212,6 +217,17 @@ class UnderwriteService:
                 ["OpenAI is required for analysis. Configure OPENAI_API_KEY and restart the backend."],
                 schema_source="live" if self.mode == "live" else "demo",
                 started=started,
+                provider=provider,
+            )
+        if provider == "baseten" and not self.baseten.configured:
+            return self._failed_run(
+                run_id,
+                package,
+                trace,
+                ["The UnderwriteIQ model is unavailable. Configure the Baseten CLI and model ID, then restart the backend."],
+                schema_source="live" if self.mode == "live" else "demo",
+                started=started,
+                provider=provider,
             )
 
         try:
@@ -227,11 +243,35 @@ class UnderwriteService:
                 [str(exc)],
                 schema_source="live" if self.mode == "live" else "demo",
                 started=started,
+                provider=provider,
             )
+
+        if provider == "baseten":
+            try:
+                evidence = await self.loader.load_declared_resources()
+            except Exception as exc:
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    [f"Federato evidence retrieval failed: {exc}"],
+                    schema_source=schema_source,
+                    started=started,
+                    provider=provider,
+                )
 
         mapper = FactMapper(package)
         mapper.registry = self.registry
         search = EvidenceSearch(self.loader, mapper)
+        if request.submission_ids:
+            requested_ids = set(request.submission_ids)
+            selected = [
+                (submission, ledger)
+                for submission, ledger in zip(search.submissions, search.ledgers)
+                if submission.id in requested_ids
+            ]
+            search.submissions[:] = [submission for submission, _ in selected]
+            search.ledgers[:] = [ledger for _, ledger in selected]
         ledger_pairs = list(zip(search.submissions, search.ledgers))
         mapped_facts, unsupported_facts = mapper.apply_schema_plan(
             [ledger for _, ledger in ledger_pairs],
@@ -271,46 +311,49 @@ class UnderwriteService:
             )
         )
 
-        try:
-            agent_result = await asyncio.wait_for(
-                self.agent.run(
-                    search=search,
-                    ledgers=search.ledgers,
-                    registry=self.registry or gateway.registry,
-                    guideline=package,
-                    profile=profile,
-                    gateway=gateway,
-                    mode=self.mode,
-                    trace=trace,
-                ),
-                timeout=self.settings.openai_request_timeout_seconds,
-            )
-        except Exception as exc:
-            message = (
-                f"OpenAI analysis exceeded {self.settings.openai_request_timeout_seconds:g} seconds."
-                if isinstance(exc, TimeoutError)
-                else f"OpenAI analysis failed: {exc}"
-            )
-            trace.append(
-                TraceEvent(
-                    id=f"trace_{uuid4().hex[:10]}",
-                    tool="openai_agent",
-                    purpose="Gather unresolved evidence before evaluation",
-                    status="failure",
-                    started_at=datetime.now(),
-                    duration_ms=1,
-                    result_summary="OpenAI analysis failed; no fallback result was returned",
-                    error=message,
+        agent_result = None
+        if provider == "openai":
+            try:
+                agent_result = await asyncio.wait_for(
+                    self.agent.run(
+                        search=search,
+                        ledgers=search.ledgers,
+                        registry=self.registry or gateway.registry,
+                        guideline=package,
+                        profile=profile,
+                        gateway=gateway,
+                        mode=self.mode,
+                        trace=trace,
+                    ),
+                    timeout=self.settings.openai_request_timeout_seconds,
                 )
-            )
-            return self._failed_run(
-                run_id,
-                package,
-                trace,
-                [*errors, message],
-                schema_source=schema_source,
-                started=started,
-            )
+            except Exception as exc:
+                message = (
+                    f"OpenAI analysis exceeded {self.settings.openai_request_timeout_seconds:g} seconds."
+                    if isinstance(exc, TimeoutError)
+                    else f"OpenAI analysis failed: {exc}"
+                )
+                trace.append(
+                    TraceEvent(
+                        id=f"trace_{uuid4().hex[:10]}",
+                        tool="openai_agent",
+                        purpose="Gather unresolved evidence before evaluation",
+                        status="failure",
+                        started_at=datetime.now(),
+                        duration_ms=1,
+                        result_summary="OpenAI analysis failed; no fallback result was returned",
+                        error=message,
+                    )
+                )
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    [*errors, message],
+                    schema_source=schema_source,
+                    started=started,
+                    provider=provider,
+                )
 
         applicable = list(zip(search.submissions, search.ledgers))
         resolved_by_agent = search.useful_changes
@@ -340,6 +383,53 @@ class UnderwriteService:
                 )
             )
 
+        baseten_result: BasetenRunResult | None = None
+        if provider == "baseten":
+            model_started = datetime.now()
+            try:
+                baseten_result = await self.baseten.run(
+                    search.submissions,
+                    search.ledgers,
+                    assessments,
+                    package,
+                )
+            except Exception as exc:
+                message = f"UnderwriteIQ model analysis failed: {exc}"
+                trace.append(
+                    TraceEvent(
+                        id=f"trace_{uuid4().hex[:10]}",
+                        tool="baseten_model",
+                        purpose="Compare the specialist model with deterministic appetite results",
+                        status="failure",
+                        started_at=model_started,
+                        duration_ms=1,
+                        result_summary="The specialist model did not return a usable result",
+                        error=message,
+                    )
+                )
+                return self._failed_run(
+                    run_id,
+                    package,
+                    trace,
+                    [*errors, message],
+                    schema_source=schema_source,
+                    started=started,
+                    provider=provider,
+                )
+            trace.append(
+                TraceEvent(
+                    id=f"trace_{uuid4().hex[:10]}",
+                    tool="baseten_model",
+                    purpose="Compare the specialist model with deterministic appetite results",
+                    status="success",
+                    started_at=model_started,
+                    duration_ms=baseten_result.latency_ms,
+                    result_summary=(
+                        f"UnderwriteIQ Qwen agreed with the deterministic outcome for "
+                        f"{baseten_result.agreement_rate:.1%} of submissions."
+                    ),
+                )
+            )
         unresolved = sum(
             fact.state != "verified"
             for _, ledger in applicable
@@ -368,13 +458,42 @@ class UnderwriteService:
             useful_fact_changes=resolved_by_agent,
             query_count=sum(event.tool == "federato_query" for event in trace),
             activity=[event for event in trace if event.tool not in {"openai_agent", "plan_fact_sources"} or event.status == "failure"],
-            agent_mode="openai",
-            agent_model=agent_result.model,
+            agent_mode=provider,
+            agent_model=(
+                agent_result.model if agent_result is not None else baseten_result.model
+            ),
             agent_summary=(
                 f"Reviewed all {len(assessments)} submissions against {package.name}. "
                 f"The evidence search updated {resolved_by_agent} underwriting answers."
+                if provider == "openai"
+                else (
+                    f"Classified {len(assessments)} normalized submissions with "
+                    f"{baseten_result.agreement_rate:.1%} agreement against the deterministic "
+                    "guideline engine. Deterministic hard requirements remain authoritative."
+                )
             ),
-            agent_adaptations=agent_result.report.adaptations,
+            agent_adaptations=(
+                agent_result.report.adaptations if agent_result is not None else []
+            ),
+            model_latency_ms=(
+                agent_result.model_latency_ms
+                if agent_result is not None
+                else baseten_result.latency_ms
+            ),
+            model_prompt_tokens=(
+                agent_result.prompt_tokens
+                if agent_result is not None
+                else baseten_result.prompt_tokens
+            ),
+            model_completion_tokens=(
+                agent_result.completion_tokens
+                if agent_result is not None
+                else baseten_result.completion_tokens
+            ),
+            model_valid_output_rate=1.0,
+            model_agreement_rate=(
+                baseten_result.agreement_rate if baseten_result is not None else None
+            ),
         )
         self.runs[run_id] = run
         return run

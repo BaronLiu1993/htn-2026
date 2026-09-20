@@ -5,6 +5,7 @@ export type AssessmentStatus =
   | "out_of_appetite";
 
 export type AnalysisStatus = AssessmentStatus | "not_analyzed";
+export type ModelProvider = "openai" | "baseten";
 
 export interface EvidenceItem {
   resource: string;
@@ -157,10 +158,15 @@ export interface AnalysisRun {
   duration_ms: number;
   tool_call_count: number;
   unresolved_fact_count: number;
-  agent_mode: "openai" | "openai_required";
+  agent_mode: "openai" | "baseten" | "openai_required" | "baseten_required";
   agent_model?: string | null;
   agent_summary?: string | null;
   agent_adaptations: string[];
+  model_latency_ms: number;
+  model_prompt_tokens: number;
+  model_completion_tokens: number;
+  model_valid_output_rate?: number | null;
+  model_agreement_rate?: number | null;
 }
 
 export interface GuidelineSummary {
@@ -201,4 +207,5 @@ export interface HealthResponse {
   mode: "demo" | "live";
   federato_configured: boolean;
   openai_configured: boolean;
+  baseten_configured: boolean;
 }

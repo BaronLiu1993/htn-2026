@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import shutil
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -26,6 +27,11 @@ class Settings:
     openai_max_turns: int
     openai_max_query_calls: int
     openai_base_url: str
+    baseten_model_id: str
+    baseten_model_name: str
+    baseten_cli_path: str
+    baseten_request_timeout_seconds: float
+    baseten_max_concurrency: int
 
     @property
     def federato_configured(self) -> bool:
@@ -72,6 +78,19 @@ class Settings:
                 1, min(int(os.getenv("OPENAI_MAX_QUERY_CALLS", "4")), 8)
             ),
             openai_base_url=os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1").rstrip("/"),
+            baseten_model_id=os.getenv("BASETEN_MODEL_ID", "woz1kxn3"),
+            baseten_model_name=os.getenv("BASETEN_MODEL_NAME", "UnderwriteIQ Qwen3-8B"),
+            baseten_cli_path=os.getenv(
+                "BASETEN_CLI_PATH",
+                shutil.which("baseten")
+                or str(Path(__file__).resolve().parents[2] / ".tools" / "bin" / "baseten"),
+            ),
+            baseten_request_timeout_seconds=max(
+                5.0, min(float(os.getenv("BASETEN_REQUEST_TIMEOUT_SECONDS", "30")), 120.0)
+            ),
+            baseten_max_concurrency=max(
+                1, min(int(os.getenv("BASETEN_MAX_CONCURRENCY", "16")), 32)
+            ),
         )
 
 

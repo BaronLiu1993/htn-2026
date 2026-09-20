@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import asyncio
 from collections import defaultdict, deque
 from datetime import date, datetime
 from typing import Any, Callable
@@ -110,11 +111,53 @@ def _identifier(record: dict[str, Any]) -> str | None:
     return str(value) if value is not None else None
 
 
+def _claim_total(record: dict[str, Any]) -> float | None:
+    direct = _number(
+        _first(record, ("loss_value", "incurred_loss", "total_incurred", "amount"))
+    )
+    if direct is not None:
+        return direct
+    components = [
+        _number(_first(record, (field,)))
+        for field in (
+            "paid_indemnity",
+            "paid_expense",
+            "reserve_indemnity",
+            "reserve_expense",
+        )
+    ]
+    known = [value for value in components if value is not None]
+    return sum(known) if known else None
+
+
 class LiveFederatoLoader:
     """Loads only package-declared resources and follows discovered references."""
 
     FIELD_ALIASES = {
-        "Submission": ("submission_number", "number", "reference_number", "received_date", "submission_date", "created_at", "insured_name"),
+        "Submission": (
+            "submission_number", "number", "reference_number", "received_date",
+            "submission_date", "created_at", "insured_name", "line_of_business",
+        ),
+        "Policy": (
+            "business_type", "line_of_business", "premium", "total_premium",
+            "written_premium", "tiv", "total_tiv", "total_insured_value", "dates",
+        ),
+        "Insured": ("name", "account_name", "insured_name", "legal_name"),
+        "Location": (
+            "state", "state_code", "primary_state", "risk_state", "address",
+            "hazard_tags", "occupancy", "protection_class",
+        ),
+        "Building": (
+            "year_built", "construction_year", "built_year", "construction_type",
+            "construction", "construction_class", "tiv", "building_value",
+            "contents_value", "business_interruption_value", "occupancy", "sprinklered",
+        ),
+        "Claim": (
+            "loss_date", "date_of_loss", "occurred_at", "loss_value",
+            "incurred_loss", "total_incurred", "amount", "paid_indemnity",
+            "paid_expense", "reserve_indemnity", "reserve_expense", "status", "litigated",
+        ),
+        "ExposureUnit": ("basis", "basis_amount", "kind", "classification"),
     }
 
     def __init__(
@@ -180,6 +223,23 @@ class LiveFederatoLoader:
         self.records = {resource: await self._query_all(resource, "Submission")}
         return self.normalize(self.records)
 
+    async def load_declared_resources(self) -> list[SubmissionEvidence]:
+        """Load every resource named by the selected guideline's source plan."""
+
+        pending: list[tuple[str, str]] = []
+        for semantic in self.semantic_resources:
+            resource = self.registry.find_resource(semantic)
+            if resource and resource not in self.records:
+                pending.append((resource, semantic))
+        if pending:
+            pages = await asyncio.gather(
+                *(self._query_all(resource, semantic) for resource, semantic in pending)
+            )
+            self.records.update(
+                {resource: rows for (resource, _), rows in zip(pending, pages)}
+            )
+        return self.normalize(self.records)
+
     def normalize(self, records: dict[str, list[dict[str, Any]]]) -> list[SubmissionEvidence]:
         resource_aliases = {
             semantic: actual for semantic in self.semantic_resources
@@ -202,6 +262,7 @@ class LiveFederatoLoader:
                 target = (target_resource, target_id)
                 if target in index:
                     adjacency[node].add(target)
+                    adjacency[target].add(node)
 
 
         def related(start: tuple[str, str]) -> dict[str, list[dict[str, Any]]]:
@@ -290,12 +351,7 @@ class LiveFederatoLoader:
                     loss_date=_date(
                         _first(claim, ("loss_date", "date_of_loss", "occurred_at"))
                     ),
-                    loss_value=_number(
-                        _first(
-                            claim,
-                            ("loss_value", "incurred_loss", "total_incurred", "amount"),
-                        )
-                    ),
+                    loss_value=_claim_total(claim),
                 )
                 for idx, claim in enumerate(claims)
             ]

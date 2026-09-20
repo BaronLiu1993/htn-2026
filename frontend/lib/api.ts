@@ -3,6 +3,7 @@ import type {
   GuidelineSummary,
   HealthResponse,
   InvestigationProfile,
+  ModelProvider,
   QueueSubmission,
 } from "./types";
 
@@ -55,6 +56,7 @@ export function fetchProfiles() {
 export function analyzeSubmissions(
   guideline: Pick<GuidelineSummary, "id" | "version">,
   submissionIds?: string[],
+  modelProvider: ModelProvider = "openai",
 ) {
   return request<AnalysisRun>("/api/analysis/batch", {
     method: "POST",
@@ -62,6 +64,7 @@ export function analyzeSubmissions(
       submission_ids: submissionIds?.length ? submissionIds : null,
       guideline_id: guideline.id,
       guideline_version: guideline.version,
+      model_provider: modelProvider,
     }),
   });
 }

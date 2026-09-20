@@ -19,6 +19,8 @@ UnderwriteIQ does not approve, price, quote, or bind insurance coverage.
 - COPE evidence coverage that separates informational factors from carrier decision rules.
 - A central tool gateway that validates schema, budgets, timeouts, adapter policy, and trace events.
 - OpenAI Responses API agent with strict schema, guideline, and Federato query tools before evaluation.
+- Selectable UnderwriteIQ Qwen3-8B specialist served by Baseten with strict JSON validation.
+- Per-run model latency, token usage, JSON validity, and specialist/rule-engine agreement telemetry.
 - Dynamic schema-grounded query construction with bounded repair and visible OpenAI failures.
 - Evidence-grounded AI explanations that cannot override appetite outcomes.
 - Stable queue ranking, evidence-backed explanations, and auditable tool traces.
@@ -34,7 +36,9 @@ flowchart LR
     UI --> API[FastAPI]
     API --> O[Analysis service]
     O --> G[Guideline and profile registries]
-    O --> A[OpenAI evidence-planning agent]
+    O --> A[Selected model provider]
+    A --> OA[OpenAI evidence-planning agent]
+    A --> B[UnderwriteIQ Qwen3-8B on Baseten]
     O --> S[Schema registry]
     O --> Q[Budgeted tool gateway]
     O --> E[Deterministic evaluator]
@@ -48,7 +52,7 @@ flowchart LR
     R --> UI
 ```
 
-OpenAI performs bounded evidence planning and explanation. It cannot override verified rule outcomes.
+OpenAI performs bounded evidence planning. The UnderwriteIQ model classifies normalized appetite evidence. The selected model cannot override verified rule outcomes.
 
 ## Run locally
 
@@ -110,6 +114,18 @@ The model must inspect schema and guideline, name the unresolved fact IDs for ea
 
 The complete design and challenge acceptance matrix are in [AGENT_PLAN.md](AGENT_PLAN.md).
 
+## UnderwriteIQ model on Baseten
+
+Install and authenticate the Baseten CLI on the backend machine, then set the deployed model ID if it differs from the default in `.env.example`. No Baseten credential is sent to the browser.
+
+```bash
+baseten login
+export BASETEN_MODEL_ID="woz1kxn3"
+python3 -m uvicorn backend.main:app --reload --port 8000
+```
+
+The queue's **Model** selector switches between `OpenAI · evidence agent` and `UnderwriteIQ · Qwen3-8B`. For the specialist path, the backend retrieves the guideline-declared Federato resources, builds the same evidence ledger used by the rule engine, sends only normalized policy/appetite facts to Baseten, validates the returned JSON, and reports agreement. The deterministic engine always owns the final four-state queue result, including hard-exclusion precedence.
+
 ## Appetite logic
 
 The 2025 property rules require new property business in an eligible state, TIV at or below $150M, premium from $50K-$175K, buildings newer than 1990, a majority of acceptable construction, and aggregate applicable five-year losses below $100K.
@@ -138,6 +154,7 @@ Omit `submission_ids` or send `null` to analyze the full queue:
 {
   "guideline_id": "guideline-a",
   "guideline_version": "2025.1",
+  "model_provider": "baseten",
   "submission_ids": ["101", "102"],
   "force_schema_refresh": false
 }
@@ -168,7 +185,7 @@ The gate requires live Federato and OpenAI credentials. It accepts only a succes
 - External enrichment is deferred because Federato marks it optional.
 - A real OpenAI run requires a server-side key and network access. Automated tests use a scripted transport so CI never consumes API credits.
 - Live acceptance has been verified against the 158-submission Federato challenge dataset; demo mode remains available as a representative schema/query sandbox when credentials are absent.
-- Baseten deployment and fine-tuning are deferred.
+- Baseten inference currently uses the authenticated CLI as a thin server-side transport. A direct deployment URL can replace it later without changing the frontend contract.
 - Construction is TIV-weighted when all per-building values exist; otherwise building count is used and disclosed.
 
 See [MVP.md](MVP.md) for the complete scope and decision record.
